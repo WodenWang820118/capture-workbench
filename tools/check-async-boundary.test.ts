@@ -53,6 +53,15 @@ test('async boundary permits only the exact approved CLI paths', async () => {
     'src',
     'client.ts',
   );
+  const runtimeE2ePath = join(
+    workspaceRoot,
+    'packages',
+    'capture-runtime',
+    'tests',
+    'e2e',
+    'local-package',
+    'pdf-ocr.e2e.ts',
+  );
   const angularSdkAdapterPath = join(
     workspaceRoot,
     'packages',
@@ -105,6 +114,7 @@ test('async boundary permits only the exact approved CLI paths', async () => {
       mkdir(dirname(angularSourcePath), { recursive: true }),
       mkdir(join(workspaceRoot, 'packages'), { recursive: true }),
       mkdir(dirname(runtimeClientPath), { recursive: true }),
+      mkdir(dirname(runtimeE2ePath), { recursive: true }),
       mkdir(dirname(angularSdkAdapterPath), { recursive: true }),
       mkdir(dirname(realOcrAssertionsPath), { recursive: true }),
       mkdir(dirname(acceptanceRunnerPath), { recursive: true }),
@@ -140,6 +150,11 @@ test('async boundary permits only the exact approved CLI paths', async () => {
     await writeFile(
       javaCandidateToolPath,
       'export async function runJavaCandidateTool() { await Promise.resolve(); }\n',
+      'utf8',
+    );
+    await writeFile(
+      runtimeE2ePath,
+      'export async function runRuntimeE2e() { await Promise.resolve(); }\n',
       'utf8',
     );
     for (const path of [

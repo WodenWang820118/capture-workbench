@@ -25,11 +25,11 @@ test('model smoke fixture command is absent unless model-smoke-app-data is compi
   );
   assert.match(
     app,
-    /#\[cfg\(feature = "model-smoke-app-data"\)\]\s*let builder = builder\.invoke_handler\(desktop_invoke_handler!\(\s*commands::model_smoke_import_fixture/u,
+    /#\[cfg\(all\(not\(feature = "acceptance-app-data"\),\s*feature = "model-smoke-app-data"\)\)\]\s*let builder = builder\.invoke_handler\(desktop_invoke_handler!\(\s*commands::model_smoke_import_fixture/u,
   );
   assert.match(
     app,
-    /#\[cfg\(not\(feature = "model-smoke-app-data"\)\)\]\s*let builder = builder\.invoke_handler\(desktop_invoke_handler!\(\)\);/u,
+    /#\[cfg\(all\(\s*not\(feature = "acceptance-app-data"\),\s*not\(feature = "model-smoke-app-data"\)\s*\)\)\]\s*let builder = builder\.invoke_handler\(desktop_invoke_handler!\(\)\);/u,
   );
 });
 

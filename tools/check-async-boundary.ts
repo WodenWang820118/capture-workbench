@@ -50,6 +50,9 @@ function exceptionReason(relativePath) {
   if (/^apps[\\/]capture-workbench-e2e[\\/]/u.test(relativePath)) {
     return 'Playwright test API boundary';
   }
+  if (/^packages[\\/]capture-runtime[\\/]tests[\\/]e2e[\\/]/u.test(relativePath)) {
+    return 'Capture Runtime local/online package E2E boundary';
+  }
   if (relativePath === 'apps/capture-workbench/src/app/app.config.ts') {
     return 'Angular bootstrap provider boundary';
   }
