@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "size_regression_check.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "size_regression_check.py"
 SPEC = importlib.util.spec_from_file_location("capture_size_regression_check", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 size_regression_check = importlib.util.module_from_spec(SPEC)

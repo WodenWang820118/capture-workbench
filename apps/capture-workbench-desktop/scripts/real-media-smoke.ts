@@ -812,7 +812,7 @@ async function deleteCapturesAndVerify(
   }
 }
 
-async function request<T>(
+export async function request<T>(
   port: number,
   token: string,
   path: string,
@@ -853,7 +853,7 @@ async function requireDirectory(path: string, name: string): Promise<void> {
     throw new Error(`${name} must be an existing prepared app-data directory.`);
 }
 
-function reservePort(): Promise<number> {
+export function reservePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
     const server = net.createServer();
     server.once('error', reject);
@@ -869,7 +869,7 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
-async function terminateOwnedTree(
+export async function terminateOwnedTree(
   child: ReturnType<typeof spawn>,
 ): Promise<void> {
   const pid = child.pid;

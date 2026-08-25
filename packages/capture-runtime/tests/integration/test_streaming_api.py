@@ -5,7 +5,6 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from conftest import TOKEN
 from fastapi.testclient import TestClient
 
 from capture_runtime.contracts import (
@@ -19,6 +18,7 @@ from capture_runtime.contracts import (
     StructuringMode,
     TimeLocator,
 )
+from tests.conftest import TOKEN
 
 
 def _source() -> bytes:

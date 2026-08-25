@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import TOKEN
 
 from capture_runtime.contract_set import (
     CONTRACT_ASSET_PATH,
@@ -17,6 +16,7 @@ from capture_runtime.contract_set import (
     load_contract_set,
     validate_route_inventory,
 )
+from tests.conftest import TOKEN
 
 
 def test_default_contract_set_is_deterministic_and_covers_v2() -> None:
@@ -192,7 +192,7 @@ def test_app_fails_closed_when_contract_route_inventory_drifts(settings_factory)
 
 
 def test_executable_packaging_embeds_contract_bytes_and_digest() -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     spec = (root / "pyinstaller" / "capture-runtime.spec").read_text(encoding="utf-8")
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
 

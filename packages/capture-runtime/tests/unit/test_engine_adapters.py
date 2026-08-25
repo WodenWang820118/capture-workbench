@@ -890,34 +890,91 @@ def test_worker_backed_audio_engine_resolution_timeout_is_bounded(tmp_path: Path
     assert not extractor.config.temp_dir.exists()
 
 
-def test_pdf_embedded_and_scanned_pages_preserve_page_provenance(
+def test_worker_backed_pdf_dispatches_every_page_to_ocr(tmp_path: Path) -> None:
+    class RecordingWorkerClient:
+        def __init__(self) -> None:
+            self.options: dict[str, object] | None = None
+
+        async def run(self, _engine: InstalledEngine, **kwargs: object) -> WorkerRunResult:
+            self.options = kwargs["options"]  # type: ignore[assignment]
+            return WorkerRunResult(
+                segments=(
+                    WorkerSegment(0, "Rendered page one", page=1),
+                    WorkerSegment(1, "Rendered page two", page=2),
+                ),
+                engine="windowsml-ocr",
+                model="pp-ocrv6-medium-windowsml",
+                digest=f"sha256:{'1' * 64}",
+                device="windowsml-dml",
+                warnings=(),
+            )
+
+    worker_client = RecordingWorkerClient()
+
+    class EngineManager:
+        async def resolve_active_engine(self, _requirement_id: str) -> InstalledEngine:
+            return InstalledEngine(
+                requirement_id="windowsml-ocr",
+                artifact_version="0.4.1",
+                executable=tmp_path / "ocr.exe",
+                model_dir=tmp_path / "models",
+            )
+
+    manager = EngineManager()
+    manager.worker_client = worker_client  # type: ignore[attr-defined]
+    extractor = StandaloneRuntimeCaptureExtractor(
+        SystemClock(),
+        _config(tmp_path),
+        engine_manager=manager,  # type: ignore[arg-type]
+    )
+    content = b"%PDF-1.7 embedded text must not be inspected"
+
+    raw = asyncio.run(
+        extractor.extract(
+            content,
+            _source(content, "source.pdf", "application/pdf"),
+            asyncio.Event(),
+        )
+    )
+
+    assert worker_client.options == {"deviceId": 0, "maxPages": 10, "renderScale": 2}
+    assert [segment.text for segment in raw.segments] == [
+        "Rendered page one",
+        "Rendered page two",
+    ]
+    assert raw.extraction_engine.engine == "windowsml-ocr"
+
+
+def test_pdf_pages_always_use_ocr_and_preserve_page_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ocr = FakeOcrAdapter("Scanned OCR")
+    ocr = FakeOcrAdapter("Rendered OCR")
     extractor = StandaloneRuntimeCaptureExtractor(
         SystemClock(),
         _config(tmp_path),
         ocr_adapter=ocr,
         whisper_adapter=FakeWhisperAdapter(),
     )
-    pages = [
-        SimpleNamespace(extract_text=lambda: "Embedded text"),
-        SimpleNamespace(extract_text=lambda: ""),
-    ]
-    monkeypatch.setattr(extractor_module, "PdfReader", lambda _source: SimpleNamespace(pages=pages))
-    monkeypatch.setattr(extractor, "_render_pdf_page", lambda _content, _index: b"png")
-    content = b"%PDF-1.7 deterministic"
+    monkeypatch.setattr(extractor, "_pdf_page_count", lambda _content: 2)
+    monkeypatch.setattr(
+        extractor,
+        "_render_pdf_page",
+        lambda _content, index: f"page-{index + 1}".encode(),
+    )
+    content = b"%PDF-1.7 embedded text is deliberately ignored"
     raw = asyncio.run(
         extractor.extract(
             content,
-            _source(content, "mixed.pdf", "application/pdf"),
+            _source(content, "source.pdf", "application/pdf"),
             asyncio.Event(),
         )
     )
-    assert [segment.text for segment in raw.segments] == ["Embedded text", "Scanned OCR"]
+
+    assert ocr.images == [b"page-1", b"page-2"]
+    assert [segment.text for segment in raw.segments] == ["Rendered OCR", "Rendered OCR"]
     assert [segment.locator.page for segment in raw.segments] == [1, 2]
-    assert raw.extraction_engine.engine == "pdf-embedded+windowsml-ocr"
-    assert raw.source_text == "Embedded text\nScanned OCR"
+    assert raw.extraction_engine.engine == "windowsml-ocr"
+    assert raw.source_text == "Rendered OCR\nRendered OCR"
 
 
 def _lifecycle(tmp_path: Path) -> IsolatedOllamaLifecycle:

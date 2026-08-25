@@ -10,9 +10,10 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from direct_model_fixtures import approved_source_lock
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "model_source_lock.py"
+from tests.direct_model_fixtures import approved_source_lock
+
+MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "model_source_lock.py"
 
 
 def _load_module() -> ModuleType:
@@ -29,7 +30,7 @@ model_source_lock = _load_module()
 
 def test_approved_production_lock_is_canonical_model_enabled() -> None:
     source = (
-        Path(__file__).resolve().parents[1] / "model-sources" / "release-model-source-lock.json"
+        Path(__file__).resolve().parents[2] / "model-sources" / "release-model-source-lock.json"
     )
     lock = model_source_lock.load_source_lock(source, require_approved=False)
     assert lock["approval"]["status"] == "approved"
@@ -51,10 +52,10 @@ def test_windows_autocrlf_checkout_preserves_canonical_source_lock(
 ) -> None:
     git = shutil.which("git")
     assert git is not None
-    workspace = Path(__file__).resolve().parents[3]
+    workspace = Path(__file__).resolve().parents[4]
     attributes_source = workspace / ".gitattributes"
     lock_source = (
-        Path(__file__).resolve().parents[1] / "model-sources" / "release-model-source-lock.json"
+        Path(__file__).resolve().parents[2] / "model-sources" / "release-model-source-lock.json"
     )
     repository = tmp_path / "repository"
     attributes_target = repository / ".gitattributes"

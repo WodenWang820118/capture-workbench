@@ -61,6 +61,9 @@ from ._engine_installation_download import (
     ModelFileDownloader,
 )
 from ._engine_installation_download import (
+    pdf_ocr_e2e_local_worker_url as _pdf_ocr_e2e_local_worker_url_impl,
+)
+from ._engine_installation_download import (
     smoke_worker_mirror_url as _smoke_worker_mirror_url_impl,
 )
 from ._engine_installation_errors import (
@@ -116,6 +119,10 @@ class _VerifiedActiveEngine:
 
 def _smoke_worker_mirror_url(environ: dict[str, str] | None = None) -> str | None:
     return _smoke_worker_mirror_url_impl(environ)
+
+
+def _pdf_ocr_e2e_local_worker_url(environ: dict[str, str] | None = None) -> str | None:
+    return _pdf_ocr_e2e_local_worker_url_impl(environ)
 
 
 def _artifact_validation_limits() -> ArtifactValidationLimits:
@@ -239,6 +246,7 @@ class EngineInstallationManager:
         self.downloader = downloader or HttpArtifactDownloader()
         self.model_downloader = model_downloader or HttpModelFileDownloader()
         self._smoke_worker_mirror_url = _smoke_worker_mirror_url()
+        self._pdf_ocr_e2e_local_worker_url = _pdf_ocr_e2e_local_worker_url()
         self._locks: dict[str, asyncio.Lock] = {}
         self._verified_active_engines: dict[str, _VerifiedActiveEngine] = {}
         self._verified_active_engines_lock = Lock()
@@ -405,16 +413,28 @@ class EngineInstallationManager:
                 report_progress(0.25 * (copied / worker_descriptor.bytes))
 
             # Keep the catalog descriptor (and therefore all integrity checks)
-            # untouched. Only the transport URL is mapped for the explicit local
-            # smoke opt-in; model delivery continues to use its locked HTTPS URLs.
-            download_descriptor = (
-                replace(
+            # untouched. The PDF OCR local-package E2E maps one exact OCR worker
+            # URL; the older packaged smoke can still map its worker origin.
+            # Direct model delivery always uses its locked HTTPS URLs.
+            download_descriptor = worker_descriptor
+            if (
+                requirement.requirement_id == "windowsml-ocr"
+                and self._pdf_ocr_e2e_local_worker_url is not None
+            ):
+                expected_suffix = f"/{worker_descriptor.file_name}"
+                if not self._pdf_ocr_e2e_local_worker_url.endswith(expected_suffix):
+                    raise EngineInstallationError(
+                        "PDF OCR E2E local worker filename does not match catalog"
+                    )
+                download_descriptor = replace(
+                    worker_descriptor,
+                    url=self._pdf_ocr_e2e_local_worker_url,
+                )
+            elif self._smoke_worker_mirror_url is not None:
+                download_descriptor = replace(
                     worker_descriptor,
                     url=f"{self._smoke_worker_mirror_url}/{worker_descriptor.file_name}",
                 )
-                if self._smoke_worker_mirror_url is not None
-                else worker_descriptor
-            )
             await self.downloader.download(
                 download_descriptor,
                 worker_archive,

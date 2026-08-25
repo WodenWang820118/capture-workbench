@@ -59,8 +59,8 @@ and shutdown. No general plugin framework is introduced.
 ## Runtime Core Boundary
 
 The core contains FastAPI/Uvicorn, Pydantic contracts, authenticated job
-lifecycle, `pypdf` embedded-text extraction, structuring providers, the
-runtime-owned engine catalog, worker orchestration, and installation logic.
+lifecycle, structuring providers, the runtime-owned engine catalog, worker
+orchestration, and installation logic.
 
 The core must not contain/import at runtime:
 
@@ -69,9 +69,9 @@ The core must not contain/import at runtime:
 - worker/model archives;
 - binaries for non-Windows or non-x64 platforms.
 
-PDF pages with embedded text are handled entirely by core. A PDF containing
-any page without embedded text is sent to the OCR worker, which owns PDF
-rendering and OCR. Images are sent to OCR; audio is sent to Whisper.
+Every PDF is sent to the OCR worker, which owns PDFium rendering and PaddleOCR
+for every page. Embedded PDF text is never read. Images are sent to OCR; audio
+is sent to Whisper.
 
 ## Catalog and Artifact Formats
 

@@ -112,19 +112,19 @@ test('real desktop cleanup selects and verifies an exact filename within the det
   );
 });
 
-test('real desktop OCR provenance accepts the runtime PDF composite engine', () => {
+test('real desktop OCR provenance requires the PaddleOCR engine', () => {
   assert.deepEqual(
     parseOcrProvenance([
-      'pdf-embedded+windowsml-ocr · pp-ocrv6-medium-windowsml · windowsml-dml',
+      'windowsml-ocr · pp-ocrv6-medium-windowsml · windowsml-dml',
     ]),
     {
-      engine: 'pdf-embedded+windowsml-ocr',
+      engine: 'windowsml-ocr',
       model: 'pp-ocrv6-medium-windowsml',
       device: 'windowsml-dml',
     },
   );
   assert.throws(
-    () => parseOcrProvenance(['pdf-embedded · pypdf · cpu']),
+    () => parseOcrProvenance(['pdf-embedded · legacy · cpu']),
     /recognized OCR device provenance/u,
   );
 });

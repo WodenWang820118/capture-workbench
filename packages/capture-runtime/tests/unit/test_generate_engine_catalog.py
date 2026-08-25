@@ -8,12 +8,11 @@ import sys
 import zipfile
 from pathlib import Path
 
-from direct_model_fixtures import approved_source_lock, pending_source_lock
-
 from capture_runtime.engine_catalog import EngineCatalog, canonical_json_bytes
 from capture_runtime.release import build_release_artifacts, write_capture_document_schema
+from tests.direct_model_fixtures import approved_source_lock, pending_source_lock
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "generate_engine_catalog.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "generate_engine_catalog.py"
 
 
 def archive_pair(directory: Path, name: str, payload_path: str) -> tuple[Path, Path]:
@@ -60,7 +59,7 @@ def test_direct_source_lock_generates_catalog_without_model_release_assets(
     catalog_path = tmp_path / "catalog" / "capture-engine-catalog.json"
     environment = dict(os.environ)
     environment["CAPTURE_OCR_MODEL_ARCHIVE"] = str(tmp_path / "ambient-model.zip")
-    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
     subprocess.run(
         [
             sys.executable,
@@ -150,7 +149,7 @@ def test_pending_source_lock_release_generation_fails_closed(
             "--whisper-worker-manifest",
             str(whisper_worker_manifest),
         ],
-        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
         stdin=subprocess.DEVNULL,
         shell=False,
         check=False,
@@ -195,7 +194,7 @@ def test_pending_source_lock_generates_only_preflight_catalog_with_explicit_flag
             "--whisper-worker-manifest",
             str(whisper_worker_manifest),
         ],
-        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
         stdin=subprocess.DEVNULL,
         shell=False,
         check=False,
@@ -251,7 +250,7 @@ def test_pending_preflight_rejects_unrelated_blockers_and_approved_lock(
                 "--whisper-worker-manifest",
                 str(whisper_worker_manifest),
             ],
-            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
             stdin=subprocess.DEVNULL,
             shell=False,
             check=False,

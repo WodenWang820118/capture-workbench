@@ -191,21 +191,42 @@ def _normalized_png(source: Path, max_pixels: int, scale: float = 1) -> bytes:
         raise ValueError("uploaded image is not readable") from error
 
 
-def _render_page(source: Path, page_index: int, scale: float) -> bytes:
+def _pdf_page_images(
+    source: Path,
+    max_pages: int,
+    scale: float,
+    cancellation: Event,
+) -> Iterator[tuple[int, bytes]]:
     document = None
-    bitmap = None
     try:
         document = pdfium.PdfDocument(str(source))
-        if not 0 <= page_index < len(document):
-            raise ValueError("PDF page index is invalid")
-        bitmap = document[page_index].render(scale=scale)
-        image = bitmap.to_pil().convert("RGB")
-        output = BytesIO()
-        image.save(output, format="PNG")
-        return output.getvalue()
+        page_count = len(document)
+        if page_count < 1:
+            raise ValueError("uploaded PDF has no pages")
+        if page_count > max_pages:
+            raise ValueError(f"PDF has {page_count} pages; limit is {max_pages}")
+        for page_number in range(1, page_count + 1):
+            if cancellation.is_set():
+                raise InterruptedError
+            _report_stage("ocr-pdf-render-start")
+            bitmap = None
+            try:
+                bitmap = document[page_number - 1].render(scale=scale)
+                image = bitmap.to_pil().convert("RGB")
+                output = BytesIO()
+                image.save(output, format="PNG")
+            except Exception as error:
+                raise ValueError(f"could not render PDF page {page_number}") from error
+            finally:
+                if bitmap is not None:
+                    bitmap.close()
+            _report_stage("ocr-pdf-render-complete")
+            yield page_number, output.getvalue()
+    except (ValueError, InterruptedError):
+        raise
+    except Exception as error:
+        raise ValueError("uploaded PDF is not readable") from error
     finally:
-        if bitmap is not None:
-            bitmap.close()
         if document is not None:
             document.close()
 
@@ -243,32 +264,19 @@ def _run(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
     )
     images: Iterable[tuple[int, bytes]]
     if media_type == "application/pdf":
-        pages = options.get("pages")
+        max_pages = options.get("maxPages")
         render_scale = options.get("renderScale")
         if (
-            not isinstance(pages, list)
-            or not pages
-            or len(pages) > 500
-            or any(
-                not isinstance(page, int) or isinstance(page, bool) or page < 1 for page in pages
-            )
-            or len(set(pages)) != len(pages)
+            set(options) != {"deviceId", "maxPages", "renderScale"}
+            or not isinstance(max_pages, int)
+            or isinstance(max_pages, bool)
+            or not 1 <= max_pages <= 500
             or not isinstance(render_scale, int | float)
             or isinstance(render_scale, bool)
             or not 0.5 <= float(render_scale) <= 8
         ):
             raise ValueError("OCR PDF options are invalid")
-
-        def render_pages() -> Iterator[tuple[int, bytes]]:
-            for page in pages:
-                if cancellation.is_set():
-                    raise InterruptedError
-                _report_stage("ocr-pdf-render-start")
-                image = _render_page(source, page - 1, float(render_scale))
-                _report_stage("ocr-pdf-render-complete")
-                yield page, image
-
-        images = render_pages()
+        images = _pdf_page_images(source, max_pages, float(render_scale), cancellation)
     elif media_type in {"image/png", "image/jpeg", "image/webp"}:
         max_pixels = options.get("maxImagePixels")
         scale = options.get("renderScale", 1)

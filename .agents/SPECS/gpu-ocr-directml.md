@@ -57,12 +57,11 @@ discrete adapter:
   suite passed 74 tests.
 - `capture-runtime:build-production-executable` passed after the environment gate.
 - `capture-workbench-desktop:smoke-real-desktop-ocr-directml --skip-nx-cache` passed against an
-  image-only one-page PDF with no extractable embedded text. This DirectML-specific target always
+  image-only one-page PDF. This DirectML-specific target always
   requires `windowsml-dml`; CPU provenance fails the gate. The packaged Tauri UI displayed
   non-empty raw OCR and structured output, and the isolated Ollama profile digest was preserved.
 - The smoke deleted its library document, left the main library at its original seven entries,
   and left no desktop or runtime process.
 
-An embedded-text PDF is not valid DirectML evidence because the runtime correctly reports
-`pdf-embedded` and bypasses OCR. The smoke accepts both the pure `windowsml-ocr` provenance and
-the `pdf-embedded+windowsml-ocr` composite used when only some PDF pages require OCR.
+Current PDF behavior always renders every page and reports `windowsml-ocr`.
+The smoke therefore rejects embedded-text and composite extraction provenance.

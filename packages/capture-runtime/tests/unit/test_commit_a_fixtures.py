@@ -8,10 +8,10 @@ import zlib
 from pathlib import Path
 from types import ModuleType
 
-from pypdf import PdfReader
+import pypdfium2 as pdfium
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "generate_commit_a_fixtures.py"
-FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "model-sources" / "commit-a"
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "generate_commit_a_fixtures.py"
+FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "model-sources" / "commit-a"
 
 
 def _load_generator() -> ModuleType:
@@ -108,10 +108,16 @@ def test_reference_png_is_valid_deterministic_rgb_image() -> None:
 
 def test_scanned_pdf_is_one_page_image_only_and_has_no_embedded_text() -> None:
     data = (FIXTURE_ROOT / "fixtures/ocr-scanned.pdf").read_bytes()
-    reader = PdfReader(FIXTURE_ROOT / "fixtures/ocr-scanned.pdf")
-    assert len(reader.pages) == 1
-    assert reader.pages[0].extract_text() in (None, "")
-    assert len(reader.pages[0].images) == 1
+    document = pdfium.PdfDocument(FIXTURE_ROOT / "fixtures/ocr-scanned.pdf")
+    try:
+        assert len(document) == 1
+        text_page = document[0].get_textpage()
+        try:
+            assert text_page.get_text_range() == ""
+        finally:
+            text_page.close()
+    finally:
+        document.close()
     assert b"CAPTURE OCR FIXTURE" not in data
     assert b"BT" not in data
 

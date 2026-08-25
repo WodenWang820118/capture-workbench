@@ -18,6 +18,8 @@ from ._engine_installation_errors import EngineInstallationError
 
 _SMOKE_WORKER_MIRROR_OPT_IN = "CAPTURE_SMOKE_WORKER_MIRROR_OPT_IN"
 _SMOKE_WORKER_MIRROR_URL = "CAPTURE_SMOKE_WORKER_MIRROR_URL"
+_PDF_OCR_E2E_LOCAL_WORKER_OPT_IN = "CAPTURE_PDF_OCR_E2E_LOCAL_WORKER_OPT_IN"
+_PDF_OCR_E2E_LOCAL_WORKER_URL = "CAPTURE_PDF_OCR_E2E_LOCAL_WORKER_URL"
 
 
 def _facade_download_chunk_bytes() -> int:
@@ -68,6 +70,46 @@ def smoke_worker_mirror_url(environ: dict[str, str] | None = None) -> str | None
     ):
         raise EngineInstallationError("smoke worker mirror must be a numeric loopback HTTP origin")
     return f"http://127.0.0.1:{port}"
+
+
+def pdf_ocr_e2e_local_worker_url(environ: dict[str, str] | None = None) -> str | None:
+    """Resolve the exact OCR worker URL used by the local-package PDF E2E.
+
+    Unlike the general packaged-smoke mirror origin, this test-only contract
+    names one complete worker URL. The installer applies it only to the OCR
+    requirement and verifies the URL filename against the locked catalog.
+    """
+
+    source = os.environ if environ is None else environ
+    if source.get(_PDF_OCR_E2E_LOCAL_WORKER_OPT_IN, "").strip() != "1":
+        return None
+    raw = source.get(_PDF_OCR_E2E_LOCAL_WORKER_URL, "").strip()
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as error:
+        raise EngineInstallationError("PDF OCR E2E local worker URL is invalid") from error
+    path_parts = parsed.path.split("/")
+    file_name = path_parts[1] if len(path_parts) == 2 else ""
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or not file_name
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+            for character in file_name
+        )
+    ):
+        raise EngineInstallationError(
+            "PDF OCR E2E local worker must be one numeric-loopback HTTP file URL"
+        )
+    return f"http://127.0.0.1:{port}/{file_name}"
 
 
 class ArtifactDownloader(Protocol):
@@ -352,6 +394,7 @@ __all__ = [
     "HttpArtifactDownloader",
     "HttpModelFileDownloader",
     "ModelFileDownloader",
+    "pdf_ocr_e2e_local_worker_url",
     "smoke_worker_mirror_url",
 ]
 

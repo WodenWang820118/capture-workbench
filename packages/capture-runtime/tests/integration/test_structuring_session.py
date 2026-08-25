@@ -7,7 +7,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from conftest import TOKEN
 from fastapi.testclient import TestClient
 
 from capture_runtime.app import create_app
@@ -28,6 +27,7 @@ from capture_runtime.storage import (
     StructuringSessionRecordCorruptError,
     StructuringSessionRepository,
 )
+from tests.conftest import TOKEN
 
 
 def _seed_host_capture(client: TestClient, *, segment_count: int = 2) -> str:

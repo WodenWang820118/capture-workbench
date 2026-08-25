@@ -5,10 +5,10 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from direct_model_fixtures import approved_source_lock
 
 from capture_runtime.engine_catalog import canonical_json_bytes
 from capture_runtime.release import build_release_artifacts, write_capture_document_schema
+from tests.direct_model_fixtures import approved_source_lock
 
 
 def sha256(path: Path) -> str:

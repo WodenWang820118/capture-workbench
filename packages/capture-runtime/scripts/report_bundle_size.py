@@ -147,8 +147,6 @@ def pyinstaller_inventory(work_dir: Path | None) -> dict[str, Any]:
                     )
                 ):
                     categories["whisper"] += size
-                elif "pypdf" in lowered:
-                    categories["pdf"] += size
                 elif any(
                     token in lowered
                     for token in (

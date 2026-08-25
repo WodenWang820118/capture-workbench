@@ -217,28 +217,20 @@ function configuredPdfPath(): string {
   return source;
 }
 
-interface PdfEmbeddedPage {
-  readonly page: number;
-  readonly text: string;
-}
-
 interface PdfEvidence {
   readonly pageCount: number;
-  readonly embeddedPages: readonly PdfEmbeddedPage[];
 }
 
 function extractPdfEvidence(path: string): PdfEvidence {
   const extractor = [
     'import json',
     'import sys',
-    'from pypdf import PdfReader',
-    'reader = PdfReader(sys.argv[1])',
-    'embedded_pages = []',
-    'for page_number, page in enumerate(reader.pages, start=1):',
-    '    text = (page.extract_text() or "").strip()',
-    '    if text:',
-    '        embedded_pages.append({"page": page_number, "text": text})',
-    'print(json.dumps({"pageCount": len(reader.pages), "embeddedPages": embedded_pages}, ensure_ascii=True))',
+    'import pypdfium2 as pdfium',
+    'document = pdfium.PdfDocument(sys.argv[1])',
+    'try:',
+    '    print(json.dumps({"pageCount": len(document)}, ensure_ascii=True))',
+    'finally:',
+    '    document.close()',
   ].join('\n');
   const result = spawnSync(
     'uv',
@@ -254,49 +246,29 @@ function extractPdfEvidence(path: string): PdfEvidence {
   );
   if (result.error || result.status !== 0) {
     throw new Error(
-      `Could not extract embedded PDF text with pypdf: ${result.error?.message || result.stderr || `exit code ${result.status}`}`,
+      `Could not inspect PDF pages with PDFium: ${result.error?.message || result.stderr || `exit code ${result.status}`}`,
     );
   }
   let evidence: unknown;
   try {
     evidence = JSON.parse(result.stdout);
   } catch (error) {
-    throw new Error('pypdf did not return valid PDF evidence JSON.', {
+    throw new Error('PDFium did not return valid PDF evidence JSON.', {
       cause: error,
     });
   }
   if (
     !evidence ||
     typeof evidence !== 'object' ||
-    !Number.isInteger((evidence as { pageCount?: unknown }).pageCount) ||
-    !Array.isArray((evidence as { embeddedPages?: unknown }).embeddedPages)
+    !Number.isInteger((evidence as { pageCount?: unknown }).pageCount)
   ) {
-    throw new Error('pypdf returned an invalid PDF evidence shape.');
+    throw new Error('PDFium returned an invalid PDF evidence shape.');
   }
   const pageCount = (evidence as { pageCount: number }).pageCount;
-  const embeddedPages = (evidence as { embeddedPages: unknown[] })
-    .embeddedPages;
-  if (
-    pageCount < 1 ||
-    embeddedPages.some(
-      (page): page is PdfEmbeddedPage =>
-        !page ||
-        typeof page !== 'object' ||
-        !Number.isInteger((page as { page?: unknown }).page) ||
-        typeof (page as { text?: unknown }).text !== 'string',
-    )
-  ) {
-    throw new Error('pypdf returned invalid embedded PDF page evidence.');
+  if (pageCount < 1) {
+    throw new Error('PDFium returned an invalid PDF page count.');
   }
-  return { pageCount, embeddedPages: embeddedPages as PdfEmbeddedPage[] };
-}
-
-function normalizeExtractedText(text: string): string {
-  return text
-    .normalize('NFKC')
-    .replace(/\r\n?/gu, '\n')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  return { pageCount };
 }
 
 function requireRegularFile(path: string, description: string): void {
@@ -658,10 +630,6 @@ async function main(): Promise<void> {
   }
   const sourceName = basename(sourcePath);
   const pdfEvidence = extractPdfEvidence(sourcePath);
-  const ocrPageCount = pdfEvidence.pageCount - pdfEvidence.embeddedPages.length;
-  if (ocrPageCount < 0) {
-    throw new Error('PDF embedded text evidence contained too many pages.');
-  }
 
   mkdirSync(fixtureBase, { recursive: true });
   const fixtureRoot = mkdtempSync(join(fixtureBase, 'runtime-web-component-'));
@@ -878,7 +846,7 @@ window.__captureE2eReady = true;
       browserOrigin,
       dataDirectory,
       workerMirror.origin,
-      ocrPageCount > 0,
+      true,
     );
     preview = await startPreview(
       fixtureRoot,
@@ -1026,13 +994,8 @@ window.__captureE2eReady = true;
       bubbles: window.__captureE2eBubbles,
       composed: window.__captureE2eComposed,
     }));
-    const expectedExtractionEngine =
-      ocrPageCount > 0
-        ? pdfEvidence.embeddedPages.length > 0
-          ? 'pdf-embedded+windowsml-ocr'
-          : 'windowsml-ocr'
-        : 'pdf-embedded-text';
-    const expectedExtractionDevice = ocrPageCount > 0 ? 'windowsml-dml' : 'cpu';
+    const expectedExtractionEngine = 'windowsml-ocr';
+    const expectedExtractionDevice = 'windowsml-dml';
     const rawSegments = state.detail?.document?.rawSegments ?? [];
     const stateSummary = {
       defined: state.defined,
@@ -1053,29 +1016,6 @@ window.__captureE2eReady = true;
           }
         : undefined,
     };
-    const embeddedTextMismatches = pdfEvidence.embeddedPages
-      .filter(({ page, text }) => {
-        const segment = rawSegments.find(
-          (candidate) =>
-            candidate.locator?.kind === 'page' &&
-            candidate.locator.page === page,
-        );
-        return (
-          !segment ||
-          normalizeExtractedText(segment.text || '') !==
-            normalizeExtractedText(text)
-        );
-      })
-      .map(({ page, text }) => ({
-        page,
-        expectedChars: normalizeExtractedText(text).length,
-        actualChars:
-          rawSegments.find(
-            (candidate) =>
-              candidate.locator?.kind === 'page' &&
-              candidate.locator.page === page,
-          )?.text?.length ?? 0,
-      }));
     if (
       !state.defined ||
       !state.shadow ||
@@ -1094,11 +1034,6 @@ window.__captureE2eReady = true;
     ) {
       throw new Error(
         `Runtime and packed Web Component lifecycle failed: ${JSON.stringify({ state: stateSummary, pageErrors, consoleErrors, requestPaths, responseStatuses, errorResponses, runtimeStderr: runtime.stderr() })}`,
-      );
-    }
-    if (embeddedTextMismatches.length > 0) {
-      throw new Error(
-        `Embedded PDF text did not conform on page(s): ${JSON.stringify(embeddedTextMismatches)}`,
       );
     }
     const expectedPaths = [
@@ -1146,7 +1081,7 @@ window.__captureE2eReady = true;
       );
     }
     process.stdout.write(
-      `Phase 1.5 runtime and packed Web Component E2E passed for ${packageManifest.name}@${packageManifest.version}: pageCount=${pdfEvidence.pageCount}; embeddedTextPages=${pdfEvidence.embeddedPages.length}; ocrPages=${ocrPageCount}; engine=${expectedExtractionEngine}; device=${expectedExtractionDevice}.\n`,
+      `Phase 1.5 runtime and packed Web Component E2E passed for ${packageManifest.name}@${packageManifest.version}: pageCount=${pdfEvidence.pageCount}; ocrPages=${pdfEvidence.pageCount}; engine=${expectedExtractionEngine}; device=${expectedExtractionDevice}.\n`,
     );
   } finally {
     await browser?.close();

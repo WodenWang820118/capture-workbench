@@ -14,7 +14,7 @@ import pytest
 from capture_runtime.engine_catalog import EngineArtifactDescriptor
 from capture_runtime.engine_installation import safe_extract_artifact
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "worker_archive.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "worker_archive.py"
 
 
 def _load_worker_archive() -> ModuleType:

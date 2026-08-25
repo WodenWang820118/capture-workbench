@@ -19,8 +19,8 @@ from capture_runtime.worker_process import (
     _subprocess_path,
 )
 
-WORKER = Path(__file__).parent / "fixtures" / "deterministic_worker.py"
-SERVER_WORKER = Path(__file__).parent / "fixtures" / "server_worker.py"
+WORKER = Path(__file__).parents[1] / "fixtures" / "deterministic_worker.py"
+SERVER_WORKER = Path(__file__).parents[1] / "fixtures" / "server_worker.py"
 
 
 class RecordingWorkerProcess:

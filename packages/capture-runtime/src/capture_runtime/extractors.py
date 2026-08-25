@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.metadata
 import tempfile
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
-
-from pypdf import PdfReader
 
 from capture_runtime.clock import Clock
 from capture_runtime.config import ExtractionRuntimeConfig
@@ -180,87 +177,22 @@ class StandaloneRuntimeCaptureExtractor:
         content: bytes,
         cancel_event: asyncio.Event,
     ) -> tuple[list[RawCaptureSegment], CaptureEngine, list[str]]:
-        try:
-            reader = PdfReader(BytesIO(content))
-        except Exception as error:
-            raise ValueError("Uploaded PDF is not readable.") from error
-        if not reader.pages:
-            raise ValueError("Uploaded PDF has no pages.")
-        if len(reader.pages) > self.config.max_pdf_pages:
-            raise ValueError(
-                f"PDF has {len(reader.pages)} pages; limit is {self.config.max_pdf_pages}."
-            )
-        embedded: dict[int, str] = {}
-        missing: list[int] = []
-        for page_number, page in enumerate(reader.pages, start=1):
-            self._checkpoint(cancel_event)
-            try:
-                text = (page.extract_text() or "").strip()
-            except Exception as error:
-                raise ValueError(f"Could not inspect PDF page {page_number}.") from error
-            if text:
-                embedded[page_number] = text
-            else:
-                missing.append(page_number)
-        worker_result: WorkerRunResult | None = None
-        worker_pages: dict[int, str] = {}
-        warnings: list[str] = []
-        if missing:
-            worker_result = await self._run_worker(
-                WINDOWSML_REQUIREMENT_ID,
-                content,
-                "application/pdf",
-                {
-                    "deviceId": self.config.windowsml_device_id,
-                    "pages": missing,
-                    "renderScale": self.config.ocr_render_scale,
-                },
-                cancel_event,
-            )
-            if worker_result.engine != "windowsml-ocr":
-                raise ValueError("OCR worker returned incompatible engine provenance")
-            if worker_result.device not in {"windowsml-dml", "cpu"}:
-                raise ValueError("OCR worker returned incompatible device provenance")
-            worker_pages = {
-                item.page: item.text for item in worker_result.segments if item.page is not None
-            }
-            warnings.extend(worker_result.warnings)
-        segments: list[RawCaptureSegment] = []
-        for page_number in range(1, len(reader.pages) + 1):
-            text = embedded.get(page_number) or worker_pages.get(page_number, "")
-            if text:
-                segments.append(
-                    RawCaptureSegment(
-                        segment_id=f"page-{page_number}",
-                        order=len(segments),
-                        locator=PageLocator(page=page_number),
-                        text=text,
-                    )
-                )
-        if embedded:
-            warnings.append(f"Used embedded PDF text on {len(embedded)} page(s).")
-        if worker_result is not None and embedded:
-            embedded_digest = pdf_embedded_engine_digest()
-            digest = hashlib.sha256(
-                f"{embedded_digest}:{worker_result.digest}".encode()
-            ).hexdigest()
-            engine = CaptureEngine(
-                engine="pdf-embedded+windowsml-ocr",
-                model=f"pypdf+{worker_result.model}",
-                digest=f"sha256:{digest}",
-                device=worker_result.device,
-            )
-        elif worker_result is not None:
-            engine = self._capture_engine(worker_result, expected_engine="windowsml-ocr")
-        else:
-            version = importlib.metadata.version("pypdf")
-            engine = CaptureEngine(
-                engine="pdf-embedded-text",
-                model=f"pypdf-{version}",
-                digest=pdf_embedded_engine_digest(),
-                device="cpu",
-            )
-        return segments, engine, warnings
+        result = await self._run_worker(
+            WINDOWSML_REQUIREMENT_ID,
+            content,
+            "application/pdf",
+            {
+                "deviceId": self.config.windowsml_device_id,
+                "maxPages": self.config.max_pdf_pages,
+                "renderScale": self.config.ocr_render_scale,
+            },
+            cancel_event,
+        )
+        return (
+            self._page_segments(result),
+            self._capture_engine(result, expected_engine="windowsml-ocr"),
+            list(result.warnings),
+        )
 
     async def _run_worker(
         self,
@@ -387,41 +319,23 @@ class StandaloneRuntimeCaptureExtractor:
     def _extract_pdf(
         self, content: bytes, cancel_event: asyncio.Event
     ) -> tuple[list[RawCaptureSegment], CaptureEngine, list[str]]:
-        try:
-            reader = PdfReader(BytesIO(content))
-        except Exception as error:
-            raise ValueError("Uploaded PDF is not readable.") from error
-        if not reader.pages:
-            raise ValueError("Uploaded PDF has no pages.")
-        if len(reader.pages) > self.config.max_pdf_pages:
-            raise ValueError(
-                f"PDF has {len(reader.pages)} pages; limit is {self.config.max_pdf_pages}."
-            )
+        if self.ocr_adapter is None:
+            raise ExtractionRuntimeUnavailableError("WindowsML OCR worker is not configured.")
+        page_count = self._pdf_page_count(content)
+        if page_count > self.config.max_pdf_pages:
+            raise ValueError(f"PDF has {page_count} pages; limit is {self.config.max_pdf_pages}.")
         segments: list[RawCaptureSegment] = []
         warnings: list[str] = []
         ocr_results = []
-        embedded_pages = 0
-        for page_number, page in enumerate(reader.pages, start=1):
+        for page_number in range(1, page_count + 1):
             self._checkpoint(cancel_event)
-            try:
-                embedded = (page.extract_text() or "").strip()
-            except Exception as error:
-                raise ValueError(f"Could not inspect PDF page {page_number}.") from error
-            if embedded:
-                text = embedded
-                embedded_pages += 1
-            else:
-                if self.ocr_adapter is None:
-                    raise ExtractionRuntimeUnavailableError(
-                        "WindowsML OCR worker is not configured."
-                    )
-                image_png = self._render_pdf_page(content, page_number - 1)
-                self._checkpoint(cancel_event)
-                result = self.ocr_adapter.extract_png(image_png)
-                ocr_results.append(result)
-                text = result.text.strip()
-                if result.warning:
-                    warnings.append(result.warning)
+            image_png = self._render_pdf_page(content, page_number - 1)
+            self._checkpoint(cancel_event)
+            result = self.ocr_adapter.extract_png(image_png)
+            ocr_results.append(result)
+            text = result.text.strip()
+            if result.warning:
+                warnings.append(result.warning)
             if text:
                 segments.append(
                     RawCaptureSegment(
@@ -431,19 +345,7 @@ class StandaloneRuntimeCaptureExtractor:
                         text=text,
                     )
                 )
-        if embedded_pages:
-            warnings.append(f"Used embedded PDF text on {embedded_pages} page(s).")
-        if ocr_results and embedded_pages:
-            ocr = ocr_results[0]
-            embedded_digest = pdf_embedded_engine_digest()
-            digest = hashlib.sha256(f"{embedded_digest}:{ocr.digest}".encode()).hexdigest()
-            engine = CaptureEngine(
-                engine="pdf-embedded+windowsml-ocr",
-                model=f"pypdf+{ocr.model}",
-                digest=f"sha256:{digest}",
-                device=ocr.device,
-            )
-        elif ocr_results:
+        if ocr_results:
             ocr = ocr_results[0]
             engine = CaptureEngine(
                 engine="windowsml-ocr",
@@ -452,17 +354,28 @@ class StandaloneRuntimeCaptureExtractor:
                 device=ocr.device,
             )
         else:
-            version = __import__("pypdf").__version__
-            engine = CaptureEngine(
-                engine="pdf-embedded-text",
-                model=f"pypdf-{version}",
-                digest=pdf_embedded_engine_digest(),
-                device="cpu",
-            )
+            raise ValueError("Uploaded PDF has no pages.")
         return segments, engine, _unique_warnings(warnings)
 
-    def _render_pdf_page(self, content: bytes, page_index: int) -> bytes:
+    @staticmethod
+    def _pdf_page_count(content: bytes) -> int:
         import pypdfium2 as pdfium  # type: ignore[import-untyped]
+
+        document = None
+        try:
+            document = pdfium.PdfDocument(BytesIO(content))
+            page_count = len(document)
+        except Exception as error:
+            raise ValueError("Uploaded PDF is not readable.") from error
+        finally:
+            if document is not None:
+                document.close()
+        if page_count < 1:
+            raise ValueError("Uploaded PDF has no pages.")
+        return page_count
+
+    def _render_pdf_page(self, content: bytes, page_index: int) -> bytes:
+        import pypdfium2 as pdfium
 
         document = None
         bitmap = None
@@ -633,11 +546,6 @@ def _unique_warnings(warnings: list[str]) -> list[str]:
 def _engine_digest(engine: str, model: str) -> str:
     value = hashlib.sha256(f"{engine}:{model}".encode()).hexdigest()
     return f"sha256:{value}"
-
-
-def pdf_embedded_engine_digest() -> str:
-    version = importlib.metadata.version("pypdf")
-    return _engine_digest("pypdf", version)
 
 
 class DeterministicCaptureExtractor:

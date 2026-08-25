@@ -5,7 +5,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "report_bundle_size.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "report_bundle_size.py"
 SPEC = importlib.util.spec_from_file_location("capture_report_bundle_size", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 report_bundle_size = importlib.util.module_from_spec(SPEC)

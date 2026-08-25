@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
-import importlib.metadata
 import importlib.util
 import sys
 import tempfile
@@ -134,11 +133,6 @@ def _directory_digest(root: Path, relative_files: Iterable[str] | None = None) -
             while chunk := source.read(1024 * 1024):
                 digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
-
-
-def _package_version_digest(package: str) -> str:
-    version = importlib.metadata.version(package)
-    return f"sha256:{hashlib.sha256(f'{package}:{version}'.encode()).hexdigest()}"
 
 
 def _paddle_texts(results: Any) -> list[str]:
@@ -674,10 +668,6 @@ class FasterWhisperAdapter:
         )
 
 
-def pdf_embedded_engine_digest() -> str:
-    return _package_version_digest("pypdf")
-
-
 __all__ = [
     "EngineProbe",
     "EngineRuntimeUnavailableError",
@@ -688,5 +678,4 @@ __all__ = [
     "WhisperTextSegment",
     "WhisperTranscriptionResult",
     "WindowsMLOcrAdapter",
-    "pdf_embedded_engine_digest",
 ]

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts"
 MODULE_PATH = SCRIPT_DIR / "verify_release_model_candidate.py"
 
 

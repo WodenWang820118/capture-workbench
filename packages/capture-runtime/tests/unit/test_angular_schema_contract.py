@@ -18,7 +18,7 @@ from capture_runtime.release import (
     write_capture_document_schema,
 )
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def test_angular_package_schema_is_the_runtime_generated_contract(tmp_path: Path) -> None:
@@ -65,7 +65,7 @@ def test_release_artifacts_fail_closed_on_incomplete_engine_catalog(
     engine_dir.mkdir()
     (engine_dir / "capture-engine-ocr.zip").write_bytes(b"worker")
     source_catalog = (
-        Path(__file__).resolve().parents[1]
+        Path(__file__).resolve().parents[2]
         / "src"
         / "capture_runtime"
         / "assets"

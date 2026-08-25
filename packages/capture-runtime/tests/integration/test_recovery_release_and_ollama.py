@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from conftest import TOKEN, idempotency_headers, poll_installation
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -35,6 +34,7 @@ from capture_runtime.release import (
     build_release_artifacts,
     write_capture_document_schema,
 )
+from tests.conftest import TOKEN, idempotency_headers, poll_installation
 
 
 class MutableClock(Clock):

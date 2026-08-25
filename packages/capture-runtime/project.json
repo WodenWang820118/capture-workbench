@@ -29,17 +29,71 @@
       "inputs": ["default"],
       "options": {
         "cwd": "packages/capture-runtime",
-        "command": "uv run --python 3.12 mypy src"
+        "command": "uv run --python 3.12 mypy src && pnpm exec tsc -p tests/tsconfig.json"
+      }
+    },
+    "test-unit": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "metadata": {
+        "description": "Hermetic unit and contract tests collected only from tests/unit."
+      },
+      "inputs": ["default"],
+      "outputs": ["{workspaceRoot}/coverage/packages/capture-runtime"],
+      "options": {
+        "cwd": "packages/capture-runtime",
+        "command": "uv run --python 3.12 pytest tests/unit && node --test tests/unit/*.test.ts"
+      }
+    },
+    "test-integration": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "metadata": {
+        "description": "Multi-component tests collected only from tests/integration; external downloads and packaged runtimes remain excluded."
+      },
+      "inputs": ["default"],
+      "options": {
+        "cwd": "packages/capture-runtime",
+        "command": "uv run --python 3.12 pytest tests/integration"
       }
     },
     "test": {
       "cache": true,
       "executor": "nx:run-commands",
+      "dependsOn": ["test-unit", "test-integration"],
+      "metadata": {
+        "description": "Compatibility aggregate for the separately collected unit and integration targets."
+      },
       "inputs": ["default"],
-      "outputs": ["{workspaceRoot}/coverage/packages/capture-runtime"],
       "options": {
-        "cwd": "packages/capture-runtime",
-        "command": "uv run --python 3.12 pytest"
+        "command": "node -e \"process.stdout.write('capture-runtime unit and integration targets completed\\n')\""
+      }
+    },
+    "e2e-local-package-pdf-ocr": {
+      "cache": false,
+      "executor": "nx:run-commands",
+      "dependsOn": ["build-release-artifacts"],
+      "metadata": {
+        "description": "Builds and launches the real local package, downloads its OCR worker from the dedicated exact loopback URL, and validates all-page PaddleOCR semantics."
+      },
+      "outputs": [
+        "{workspaceRoot}/tmp/capture-runtime/pdf-ocr-e2e/local-package/evidence.json"
+      ],
+      "options": {
+        "command": "node packages/capture-runtime/tests/e2e/local-package/pdf-ocr.e2e.ts"
+      }
+    },
+    "e2e-online-package-pdf-ocr": {
+      "cache": false,
+      "executor": "nx:run-commands",
+      "metadata": {
+        "description": "Downloads the official online runtime package, forbids local worker URL overrides, installs the catalog HTTPS OCR worker, and validates all-page PaddleOCR semantics."
+      },
+      "outputs": [
+        "{workspaceRoot}/tmp/capture-runtime/pdf-ocr-e2e/online-package/evidence.json"
+      ],
+      "options": {
+        "command": "node packages/capture-runtime/tests/e2e/online-package/pdf-ocr.e2e.ts"
       }
     },
     "build": {

@@ -10,7 +10,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from conftest import TOKEN
 from fastapi.testclient import TestClient
 
 from capture_runtime.app import create_app
@@ -26,6 +25,7 @@ from capture_runtime.ollama import (
     OwnedProcess,
     SystemRuntimeInstaller,
 )
+from tests.conftest import TOKEN
 
 
 class ProbeAdapter:

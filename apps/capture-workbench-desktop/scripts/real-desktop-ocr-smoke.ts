@@ -773,18 +773,16 @@ async function readStructuredProvenance(
 export function parseOcrProvenance(
   provenance: readonly string[],
 ): {
-  engine: 'windowsml-ocr' | 'pdf-embedded+windowsml-ocr';
+  engine: 'windowsml-ocr';
   model: string;
   device: OcrDevice;
 } {
   const value = provenance.find(
-    (entry) =>
-      entry.startsWith('windowsml-ocr · ') ||
-      entry.startsWith('pdf-embedded+windowsml-ocr · '),
+    (entry) => entry.startsWith('windowsml-ocr · '),
   ) ?? '';
   const [engine = '', model = '', device = ''] = value.split(' · ').map((entry) => entry.trim());
   if (
-    (engine !== 'windowsml-ocr' && engine !== 'pdf-embedded+windowsml-ocr') ||
+    engine !== 'windowsml-ocr' ||
     !model ||
     (device !== 'windowsml-dml' && device !== 'cpu')
   ) {

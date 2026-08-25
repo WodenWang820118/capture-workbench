@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from conftest import TOKEN, idempotency_headers
 from fastapi.testclient import TestClient
 
 from capture_runtime.app import create_app
 from capture_runtime.ollama import FakeRuntimeInstaller
+from tests.conftest import TOKEN, idempotency_headers
 
 
 def test_v2_health_auth_host_origin_and_version_handshake(client: TestClient) -> None:

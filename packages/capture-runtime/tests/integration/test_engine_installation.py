@@ -789,7 +789,7 @@ def test_separate_process_install_lock_blocks_then_releases(tmp_path: Path) -> N
     catalog, sources = _catalog(tmp_path)
     root = tmp_path / "engines"
     lock_path = root / "windowsml-ocr" / ".install.lock"
-    source_root = Path(__file__).parents[1] / "src"
+    source_root = Path(__file__).parents[2] / "src"
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(source_root), environment.get("PYTHONPATH", "")]
@@ -1001,3 +1001,113 @@ def test_smoke_worker_mirror_maps_only_worker_transport(
         item.url for item in catalog.requirement("windowsml-ocr").model_delivery().files
     ]
     assert all(url.startswith("https://") for url in model_downloader.seen_urls)
+
+
+def test_pdf_ocr_e2e_local_worker_url_maps_only_ocr_worker_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, sources = _catalog(tmp_path)
+    payload = catalog.to_dict()
+    whisper = json.loads(json.dumps(payload["requirements"][0]))
+    whisper["requirementId"] = "whisper-primary"
+    whisper["artifacts"][0]["requirementId"] = "whisper-primary"
+    payload["requirements"].append(whisper)
+    catalog = EngineCatalog.from_dict(payload)
+    ocr_worker = catalog.requirement("windowsml-ocr").worker_artifact()
+    dedicated_url = f"http://127.0.0.1:43124/{ocr_worker.file_name}"
+    monkeypatch.setenv("CAPTURE_PDF_OCR_E2E_LOCAL_WORKER_OPT_IN", "1")
+    monkeypatch.setenv("CAPTURE_PDF_OCR_E2E_LOCAL_WORKER_URL", dedicated_url)
+
+    class RecordingDownloader(CopyDownloader):
+        seen_urls: list[str] = []
+
+        async def download(self, descriptor, destination, *, cancel_event, progress) -> None:
+            self.seen_urls.append(descriptor.url)
+            await super().download(
+                descriptor,
+                destination,
+                cancel_event=cancel_event,
+                progress=progress,
+            )
+
+    class RecordingModelDownloader(CopyModelDownloader):
+        seen_urls: list[str] = []
+
+        async def download(self, descriptor, destination, *, cancel_event, progress) -> None:
+            self.seen_urls.append(descriptor.url)
+            await super().download(
+                descriptor,
+                destination,
+                cancel_event=cancel_event,
+                progress=progress,
+            )
+
+    downloader = RecordingDownloader(sources)
+    model_downloader = RecordingModelDownloader(sources)
+    manager = EngineInstallationManager(
+        tmp_path / "engines",
+        catalog,
+        worker_client=FakeWorkerClient(),  # type: ignore[arg-type]
+        downloader=downloader,
+        model_downloader=model_downloader,
+    )
+    for requirement_id in ("windowsml-ocr", "whisper-primary"):
+        asyncio.run(
+            manager.install(
+                requirement_id,
+                cancel_event=asyncio.Event(),
+                report_progress=lambda _value: None,
+            )
+        )
+
+    assert downloader.seen_urls == [
+        dedicated_url,
+        catalog.requirement("whisper-primary").worker_artifact().url,
+    ]
+    assert model_downloader.seen_urls == [
+        item.url
+        for requirement_id in ("windowsml-ocr", "whisper-primary")
+        for item in catalog.requirement(requirement_id).model_delivery().files
+    ]
+    assert all(url.startswith("https://") for url in model_downloader.seen_urls)
+
+
+def test_pdf_ocr_e2e_local_worker_url_requires_opt_in_and_catalog_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, sources = _catalog(tmp_path)
+    monkeypatch.setenv(
+        "CAPTURE_PDF_OCR_E2E_LOCAL_WORKER_URL",
+        "http://127.0.0.1:43124/wrong-worker.zip",
+    )
+    manager_without_opt_in = EngineInstallationManager(
+        tmp_path / "without-opt-in",
+        catalog,
+        worker_client=FakeWorkerClient(),  # type: ignore[arg-type]
+        downloader=CopyDownloader(sources),
+        model_downloader=CopyModelDownloader(sources),
+    )
+    asyncio.run(
+        manager_without_opt_in.install(
+            "windowsml-ocr",
+            cancel_event=asyncio.Event(),
+            report_progress=lambda _value: None,
+        )
+    )
+
+    monkeypatch.setenv("CAPTURE_PDF_OCR_E2E_LOCAL_WORKER_OPT_IN", "1")
+    manager_with_wrong_name = EngineInstallationManager(
+        tmp_path / "wrong-name",
+        catalog,
+        worker_client=FakeWorkerClient(),  # type: ignore[arg-type]
+        downloader=CopyDownloader(sources),
+        model_downloader=CopyModelDownloader(sources),
+    )
+    with pytest.raises(EngineInstallationError, match="filename does not match catalog"):
+        asyncio.run(
+            manager_with_wrong_name.install(
+                "windowsml-ocr",
+                cancel_event=asyncio.Event(),
+                report_progress=lambda _value: None,
+            )
+        )

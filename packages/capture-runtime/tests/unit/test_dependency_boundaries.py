@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
-OCR_SPEC = Path(__file__).resolve().parents[1] / "pyinstaller" / "capture-engine-ocr.spec"
-RUNTIME_SPEC = Path(__file__).resolve().parents[1] / "pyinstaller" / "capture-runtime.spec"
+PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+OCR_SPEC = Path(__file__).resolve().parents[2] / "pyinstaller" / "capture-engine-ocr.spec"
+RUNTIME_SPEC = Path(__file__).resolve().parents[2] / "pyinstaller" / "capture-runtime.spec"
 REQUIREMENT_NAME = re.compile(
     r"^(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?=\s*(?:@|\[|[<>=!~;]|$))"
 )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
 from threading import Event
@@ -31,7 +32,7 @@ def test_ocr_run_prepares_native_runtime_before_cancellation_listener(monkeypatc
 
 
 def test_model_worker_pyinstaller_specs_do_not_collect_public_contract_package_data() -> None:
-    pyinstaller_root = Path(__file__).resolve().parents[1] / "pyinstaller"
+    pyinstaller_root = Path(__file__).resolve().parents[2] / "pyinstaller"
 
     for name in ("capture-engine-ocr.spec", "capture-engine-whisper.spec"):
         spec = (pyinstaller_root / name).read_text(encoding="utf-8")
@@ -49,11 +50,16 @@ def test_ocr_pdf_renders_one_page_at_a_time(
     resident_pages = 0
     peak_resident_pages = 0
 
-    def render_page(_source: Path, page_index: int, _scale: float) -> bytes:
+    def page_images(
+        _source: Path, max_pages: int, scale: float, _cancellation: Event
+    ) -> Iterator[tuple[int, bytes]]:
+        assert max_pages == 3
+        assert scale == 2
         nonlocal resident_pages, peak_resident_pages
-        resident_pages += 1
-        peak_resident_pages = max(peak_resident_pages, resident_pages)
-        return f"page-{page_index}".encode()
+        for page_number in range(1, 4):
+            resident_pages += 1
+            peak_resident_pages = max(peak_resident_pages, resident_pages)
+            yield page_number, f"page-{page_number}".encode()
 
     class TestAdapter:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -70,7 +76,7 @@ def test_ocr_pdf_renders_one_page_at_a_time(
                 warning=None,
             )
 
-    monkeypatch.setattr(ocr_main, "_render_page", render_page)
+    monkeypatch.setattr(ocr_main, "_pdf_page_images", page_images)
     monkeypatch.setattr(ocr_main, "WindowsMLOcrAdapter", TestAdapter)
 
     result = ocr_main.handle(
@@ -85,7 +91,7 @@ def test_ocr_pdf_renders_one_page_at_a_time(
                 "mediaType": "application/pdf",
                 "options": {
                     "deviceId": 0,
-                    "pages": [1, 2, 3],
+                    "maxPages": 3,
                     "renderScale": 2,
                 },
             },
@@ -98,6 +104,27 @@ def test_ocr_pdf_renders_one_page_at_a_time(
     assert [segment["page"] for segment in result["segments"]] == [1, 2, 3]
 
 
+def test_ocr_pdf_page_stream_enforces_configured_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed = False
+
+    class TestDocument:
+        def __len__(self) -> int:
+            return 4
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(ocr_main.pdfium, "PdfDocument", lambda _source: TestDocument())
+
+    with pytest.raises(ValueError, match="PDF has 4 pages; limit is 3"):
+        list(ocr_main._pdf_page_images(tmp_path / "source.pdf", 3, 2, Event()))
+
+    assert closed
+
+
 def test_ocr_run_reports_empty_output_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -108,7 +135,11 @@ def test_ocr_run_reports_empty_output_stage(
     stages: list[str] = []
 
     monkeypatch.setattr(ocr_main, "_report_stage", stages.append)
-    monkeypatch.setattr(ocr_main, "_render_page", lambda *_args: b"page")
+    monkeypatch.setattr(
+        ocr_main,
+        "_pdf_page_images",
+        lambda *_args: iter([(1, b"page")]),
+    )
 
     class EmptyAdapter:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -138,7 +169,7 @@ def test_ocr_run_reports_empty_output_stage(
                     "mediaType": "application/pdf",
                     "options": {
                         "deviceId": 0,
-                        "pages": [1],
+                        "maxPages": 1,
                         "renderScale": 2,
                     },
                 },
