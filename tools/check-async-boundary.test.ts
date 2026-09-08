@@ -150,6 +150,20 @@ test('async boundary permits only the exact approved CLI paths', async () => {
     'scripts',
     'local-candidate-worker-mirror-neighbor.ts',
   );
+  const filesystemAuthorityPath = join(
+    workspaceRoot,
+    'apps',
+    'capture-workbench-desktop',
+    'scripts',
+    'filesystem-authority.ts',
+  );
+  const filesystemAuthorityNeighborPath = join(
+    workspaceRoot,
+    'apps',
+    'capture-workbench-desktop',
+    'scripts',
+    'filesystem-authority-neighbor.ts',
+  );
   const acceptanceRunnerPath = join(
     workspaceRoot,
     'apps',
@@ -208,6 +222,7 @@ test('async boundary permits only the exact approved CLI paths', async () => {
       mkdir(dirname(angularSdkAdapterPath), { recursive: true }),
       mkdir(dirname(realOcrAssertionsPath), { recursive: true }),
       mkdir(dirname(localCandidateWorkerMirrorPath), { recursive: true }),
+      mkdir(dirname(filesystemAuthorityPath), { recursive: true }),
       mkdir(dirname(acceptanceRunnerPath), { recursive: true }),
       mkdir(dirname(acceptanceContractPath), { recursive: true }),
       mkdir(dirname(threeProjectAcceptancePath), { recursive: true }),
@@ -262,6 +277,11 @@ test('async boundary permits only the exact approved CLI paths', async () => {
       'export async function runLocalCandidateWorkerMirror() { await Promise.resolve(); }\n',
       'utf8',
     );
+    await writeFile(
+      filesystemAuthorityPath,
+      'export async function probeFilesystemAuthority() { await Promise.resolve(); }\n',
+      'utf8',
+    );
     await writeFile(acceptanceScopePath, acceptanceScopeLegalSource, 'utf8');
 
     const installedCliResult = runChecker(checkerPath);
@@ -269,6 +289,18 @@ test('async boundary permits only the exact approved CLI paths', async () => {
     assert.match(
       installedCliResult.stdout,
       /Async-boundary check passed; [1-9]\d* approved framework\/test boundary occurrence\(s\)\./u,
+    );
+
+    await writeFile(
+      filesystemAuthorityNeighborPath,
+      'export async function escapedFilesystemAuthority() { await Promise.resolve(); }\n',
+      'utf8',
+    );
+    const escapedFilesystemAuthorityResult = runChecker(checkerPath);
+    assert.equal(escapedFilesystemAuthorityResult.status, 1);
+    assert.match(
+      escapedFilesystemAuthorityResult.stderr,
+      /apps\/capture-workbench-desktop\/scripts\/filesystem-authority-neighbor\.ts:1 async function/u,
     );
 
     await writeFile(

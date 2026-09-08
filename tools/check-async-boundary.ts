@@ -158,6 +158,12 @@ function exceptionReason(relativePath) {
   if (relativePath === 'apps/capture-workbench-desktop/scripts/local-candidate-model.ts') {
     return 'local candidate model asset process boundary';
   }
+  if (
+    relativePath ===
+    'apps/capture-workbench-desktop/scripts/filesystem-authority.ts'
+  ) {
+    return 'canonical filesystem-authority live-probe deep module';
+  }
   if (relativePath === 'apps/capture-workbench-desktop/scripts/ocr-semantic-evidence.ts') {
     return 'real OCR semantic evidence CLI boundary';
   }
