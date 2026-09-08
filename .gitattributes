@@ -20,7 +20,6 @@ packages/capture-runtime-client-python/src/capture_runtime_client/private/assets
 packages/capture-runtime-client-python/src/capture_runtime_client/private/assets/contract-set.sha256 text eol=lf
 packages/capture-runtime-client-python/src/capture_runtime_client/private/generated_models.py text eol=lf
 packages/capture-runtime-client-python/src/capture_runtime_client/private/schemas/capture-block.schema.json text eol=lf
-packages/capture-runtime-client-python/src/capture_runtime_client/private/schemas/capture-document.schema.json text eol=lf
 packages/capture-runtime-client-python/src/capture_runtime_client/private/schemas/capture-engine.schema.json text eol=lf
 packages/capture-runtime-client-python/src/capture_runtime_client/private/schemas/capture-event-v2.schema.json text eol=lf
 packages/capture-runtime-client-python/src/capture_runtime_client/private/schemas/capture-failure-v2.schema.json text eol=lf

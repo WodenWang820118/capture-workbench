@@ -64,7 +64,7 @@ def test_all_checked_in_generated_contract_outputs_require_lf_eol() -> None:
     paths = sorted(path.relative_to(ROOT).as_posix() for path in expected)
 
     result = subprocess.run(
-        ["git", "check-attr", "eol", "--stdin"],
+        ["git", "check-attr", "text", "eol", "--stdin"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -74,9 +74,17 @@ def test_all_checked_in_generated_contract_outputs_require_lf_eol() -> None:
     stdout = result.stdout.decode("utf-8")
     stderr = result.stderr.decode("utf-8")
     assert result.returncode == 0, stdout + stderr
-    attributes = stdout.splitlines()
-    assert len(attributes) == len(paths)
-    assert all(attribute.endswith(": eol: lf") for attribute in attributes), stdout
+    attributes: dict[str, dict[str, str]] = {}
+    for line in stdout.splitlines():
+        path, attribute, value = line.rsplit(": ", 2)
+        attributes.setdefault(path, {})[attribute] = value
+
+    assert set(attributes) == set(paths)
+    for path in paths:
+        values = attributes[path]
+        if values["text"] == "unset":
+            continue
+        assert values == {"text": "set", "eol": "lf"}, f"{path}: {values}"
 
 
 def test_packaged_ocr_profile_is_the_canonical_model_lock_bytes() -> None:
