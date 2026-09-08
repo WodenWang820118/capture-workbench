@@ -50,6 +50,35 @@ def test_runtime_contract_asset_is_regenerated_without_drift() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_all_checked_in_generated_contract_outputs_require_lf_eol() -> None:
+    """The generator's canonical output set must remain LF-normalized in Git."""
+
+    generator = _generator_module()
+    expected = generator._expected_files(
+        None,
+        generator.RUNTIME_ASSET_DIR,
+        generator.JAVA_OUTPUT,
+        generator.JAVA_CONTRACT_HASH_OUTPUT,
+        generator.CONSUMER_ROOT,
+    )
+    paths = sorted(path.relative_to(ROOT).as_posix() for path in expected)
+
+    result = subprocess.run(
+        ["git", "check-attr", "eol", "--stdin"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        input=("\n".join(paths) + "\n").encode("utf-8"),
+    )
+
+    stdout = result.stdout.decode("utf-8")
+    stderr = result.stderr.decode("utf-8")
+    assert result.returncode == 0, stdout + stderr
+    attributes = stdout.splitlines()
+    assert len(attributes) == len(paths)
+    assert all(attribute.endswith(": eol: lf") for attribute in attributes), stdout
+
+
 def test_packaged_ocr_profile_is_the_canonical_model_lock_bytes() -> None:
     source = (
         ROOT
