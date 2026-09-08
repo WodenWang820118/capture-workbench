@@ -805,9 +805,10 @@ test('the linked coordinator runs the exact baseline and canonical contract with
       canonicalExitCode: 0,
     });
     assert.deepEqual(input.parentEnvironment, originalEnvironment);
+    const canonicalSourceRoot = await realpath(fixture.sourceRoot);
     assert.deepEqual(
       harness.copiedSources.map((source) =>
-        relative(fixture.sourceRoot, source).replaceAll('\\', '/'),
+        relative(canonicalSourceRoot, source).replaceAll('\\', '/'),
       ),
       MODEL_FILES.map(([path]) => path),
     );

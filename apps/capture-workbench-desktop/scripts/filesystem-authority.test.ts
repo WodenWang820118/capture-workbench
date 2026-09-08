@@ -47,7 +47,7 @@ test('ancestor junction aliases are accepted while direct and child reparses are
     const authority = await openFilesystemAuthority(authorityRoot);
     assert.equal(
       await authority.resolveFile(join(authorityRoot, 'safe.txt'), 'safe file'),
-      join(physicalRoot, 'authority', 'safe.txt'),
+      join(authority.canonicalRoot, 'safe.txt'),
     );
 
     await symlink(join(physicalRoot, 'authority'), directRootLink, 'junction');
