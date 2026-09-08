@@ -6,21 +6,31 @@
 
 from __future__ import annotations
 
-import sys
+import hashlib
 import importlib
 import re
+import sys
 import warnings
+from collections.abc import Callable, Iterable, Iterator
 from io import BytesIO
 from pathlib import Path
 from threading import Event
-from collections.abc import Iterable, Iterator
 from typing import Any
+
+from capture_runtime.worker_stage_policy import (
+    ocr_import_failure_stage,
+    ocr_import_stage,
+    sanitize_worker_stage,
+)
 
 STAGE_PREFIX = "capture-worker-stage:"
 
 
 def _report_stage(stage: str) -> None:
-    sys.stderr.write(f"{STAGE_PREFIX}{stage}\n")
+    safe_stage = sanitize_worker_stage(stage)
+    if safe_stage is None:
+        return
+    sys.stderr.write(f"{STAGE_PREFIX}{safe_stage}\n")
     sys.stderr.flush()
 
 
@@ -42,42 +52,34 @@ from capture_runtime.engine_adapters import (
     _install_offline_aistudio_stubs,
     _install_offline_huggingface_stubs,
 )
+from capture_runtime.contracts import CaptureFailureV2
 from capture_runtime.image_normalization import bounded_scaled_dimensions
+from capture_runtime.ocr_preflight import (
+    NativeOcrGpuCapabilityProbe,
+    OcrComputePlan,
+    OcrExecutionPlan,
+)
+from capture_runtime.ocr_projection import OcrPageManifest, OcrPipeline
 from capture_runtime.worker_contracts import WorkerRequest
 from capture_runtime.workers.server import serve
 
 _report_stage("python-import-capture-runtime-complete")
 
 MAX_SOURCE_BYTES = 50 * 1024 * 1024
+_OCR_PIPELINE = OcrPipeline()
 
 
 def _import_ocr_runtime() -> None:
     _install_offline_aistudio_stubs()
     _install_offline_huggingface_stubs()
-    for module, stage in (
-        ("onnxruntime", "python-import-onnxruntime"),
-        ("paddleocr", "python-import-paddleocr"),
-    ):
-        _report_stage(f"{stage}-start")
+    for module in ("onnxruntime", "paddleocr"):
+        _report_stage(ocr_import_stage(module, "start"))
         try:
             importlib.import_module(module)
         except Exception as error:
-            detail = type(error).__name__.lower()
-            missing_name = getattr(error, "name", None)
-            if isinstance(missing_name, str) and re.fullmatch(r"[A-Za-z0-9_.]+", missing_name):
-                detail += "-missing-" + re.sub(r"[._]+", "-", missing_name.lower())
-            traceback_cursor = error.__traceback__
-            failure_module = None
-            while traceback_cursor is not None:
-                candidate = traceback_cursor.tb_frame.f_globals.get("__name__")
-                if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_.]+", candidate):
-                    failure_module = candidate
-                traceback_cursor = traceback_cursor.tb_next
-            if failure_module is not None:
-                detail += "-in-" + re.sub(r"[._]+", "-", failure_module.lower())
-            _report_stage(f"{stage}-failed-{detail}")
+            _report_stage(ocr_import_failure_stage(module, error))
             raise
-        _report_stage(f"{stage}-complete")
+        _report_stage(ocr_import_stage(module, "complete"))
 
 
 def _payload(request: WorkerRequest, expected: set[str]) -> dict[str, Any]:
@@ -106,11 +108,8 @@ def _probe(request: WorkerRequest) -> dict[str, Any]:
     if payload["requirementId"] != "windowsml-ocr":
         raise ValueError("OCR requirementId is invalid")
     options = payload.get("options", {})
-    if not isinstance(options, dict) or set(options) - {"deviceId"}:
+    if not isinstance(options, dict) or set(options):
         raise ValueError("OCR probe options are invalid")
-    device_id = options.get("deviceId", 0)
-    if not isinstance(device_id, int) or isinstance(device_id, bool) or device_id < 0:
-        raise ValueError("OCR probe deviceId is invalid")
     model_path = _model_path(payload["modelPath"], required=False)
     if model_path is None:
         import importlib.util
@@ -131,7 +130,7 @@ def _probe(request: WorkerRequest) -> dict[str, Any]:
             ),
             "device": None,
         }
-    adapter = WindowsMLOcrAdapter(model_path, device_id=device_id)
+    adapter = WindowsMLOcrAdapter(model_path)
     probe = adapter.probe()
     device = None
     if probe.ready:
@@ -144,6 +143,73 @@ def _probe(request: WorkerRequest) -> dict[str, Any]:
         "detail": probe.detail,
         "device": device,
     }
+
+
+def _preflight(request: WorkerRequest) -> dict[str, Any]:
+    """Decide OCR compute in this worker's ORT/native environment only."""
+
+    expected = {
+        "requirementId",
+        "artifactVersion",
+        "modelPath",
+        "contractSha256",
+        "options",
+    }
+    payload = request.payload
+    payload_fields = set(payload)
+    if not expected.issubset(payload_fields) or not payload_fields.issubset(
+        expected | {"expectedWorkerSha256"}
+    ):
+        raise ValueError("OCR compute preflight payload fields are invalid")
+    if payload["requirementId"] != "windowsml-ocr" or payload["modelPath"] is not None:
+        raise ValueError("OCR compute preflight worker identity is invalid")
+    contract_sha256 = payload["contractSha256"]
+    if (
+        not isinstance(contract_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", contract_sha256) is None
+    ):
+        raise ValueError("OCR compute preflight contract SHA-256 is invalid")
+    options = payload["options"]
+    if not isinstance(options, dict) or set(options):
+        raise ValueError("OCR compute preflight options are invalid")
+    expected_worker_sha256 = payload.get("expectedWorkerSha256")
+    if expected_worker_sha256 is not None and (
+        not isinstance(expected_worker_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_worker_sha256) is None
+    ):
+        raise ValueError("OCR compute preflight worker SHA-256 is invalid")
+    worker_sha256 = _worker_executable_sha256()
+    if expected_worker_sha256 is not None and worker_sha256 != expected_worker_sha256:
+        raise ValueError("OCR compute preflight worker executable identity mismatch")
+    capability_probe = NativeOcrGpuCapabilityProbe()
+    selection = OcrComputePlan(
+        contract_sha256=contract_sha256,
+        worker_sha256=worker_sha256,
+        capability_probe=capability_probe,
+    ).select()
+    if selection is None:
+        raise ValueError("OCR compute selection is unavailable")
+    return selection.to_dict()
+
+
+def _worker_executable_sha256() -> str:
+    """Hash the worker image that owns this preflight decision.
+
+    PyInstaller one-file workers expose their original executable through
+    ``sys.executable``. The source-worker test seam has no frozen executable,
+    so it hashes this module instead; production manager probes always send a
+    catalog digest and therefore take the frozen path.
+    """
+
+    image = Path(sys.executable if getattr(sys, "frozen", False) else __file__)
+    try:
+        digest = hashlib.sha256()
+        with image.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError as error:
+        raise ValueError("OCR compute preflight worker executable is unreadable") from error
 
 
 def _normalized_png(source: Path, max_pixels: int, scale: float = 1) -> bytes:
@@ -191,11 +257,24 @@ def _normalized_png(source: Path, max_pixels: int, scale: float = 1) -> bytes:
         raise ValueError("uploaded image is not readable") from error
 
 
+def _image_raster_metadata(source: Path, image_png: bytes) -> tuple[int, int, float]:
+    with Image.open(source) as image:
+        oriented = ImageOps.exif_transpose(image)
+        source_width, source_height = oriented.size
+    with Image.open(BytesIO(image_png)) as normalized:
+        width, height = normalized.size
+    if source_width <= 0 or source_height <= 0 or width <= 0 or height <= 0:
+        raise ValueError("OCR image raster metadata is invalid")
+    return width, height, min(width / source_width, height / source_height)
+
+
 def _pdf_page_images(
     source: Path,
     max_pages: int,
     scale: float,
     cancellation: Event,
+    *,
+    page_numbers: tuple[int, ...] | None = None,
 ) -> Iterator[tuple[int, bytes]]:
     document = None
     try:
@@ -205,7 +284,16 @@ def _pdf_page_images(
             raise ValueError("uploaded PDF has no pages")
         if page_count > max_pages:
             raise ValueError(f"PDF has {page_count} pages; limit is {max_pages}")
-        for page_number in range(1, page_count + 1):
+        selected_page_numbers = (
+            tuple(range(1, page_count + 1)) if page_numbers is None else page_numbers
+        )
+        if (
+            not selected_page_numbers
+            or selected_page_numbers != tuple(range(1, len(selected_page_numbers) + 1))
+            or selected_page_numbers[-1] > page_count
+        ):
+            raise ValueError("OCR PDF page selection must be an ordered prefix in the source")
+        for page_number in selected_page_numbers:
             if cancellation.is_set():
                 raise InterruptedError
             _report_stage("ocr-pdf-render-start")
@@ -231,7 +319,56 @@ def _pdf_page_images(
             document.close()
 
 
-def _run(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
+def _page_manifest(value: object) -> tuple[OcrPageManifest, ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 500:
+        raise ValueError("OCR page manifest is invalid")
+    manifest: list[OcrPageManifest] = []
+    for expected_page, item in enumerate(value, 1):
+        if not isinstance(item, dict) or set(item) != {"page", "raster"}:
+            raise ValueError("OCR page manifest is invalid")
+        if item["page"] != expected_page:
+            raise ValueError("OCR page manifest is not ordered")
+        raster = item["raster"]
+        if not isinstance(raster, dict) or set(raster) != {
+            "width",
+            "height",
+            "scale",
+            "coordinateSystem",
+        }:
+            raise ValueError("OCR page manifest raster is invalid")
+        width = raster["width"]
+        height = raster["height"]
+        scale = raster["scale"]
+        coordinate_system = raster["coordinateSystem"]
+        if (
+            not isinstance(width, int)
+            or isinstance(width, bool)
+            or width <= 0
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or height <= 0
+            or isinstance(scale, bool)
+            or not isinstance(scale, int | float)
+            or not 0 < float(scale) <= 8
+            or coordinate_system != "pixel"
+        ):
+            raise ValueError("OCR page manifest raster is invalid")
+        manifest.append(
+            OcrPageManifest(
+                page=expected_page,
+                raster_width=width,
+                raster_height=height,
+                raster_scale=float(scale),
+            )
+        )
+    return tuple(manifest)
+
+
+def _run(
+    request: WorkerRequest,
+    cancellation: Event,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     payload = _payload(
         request,
         {
@@ -257,17 +394,44 @@ def _run(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
     options = payload["options"]
     if not isinstance(media_type, str) or not isinstance(options, dict):
         raise ValueError("OCR run mediaType/options are invalid")
-    adapter = WindowsMLOcrAdapter(
-        model_path,
-        device_id=int(options.get("deviceId", 0)),
-        stage_reporter=_report_stage,
-    )
+    manifest = _page_manifest(options.get("pageManifest"))
+    compute_plan_value = options.get("computePlan")
+    compute_plan = None
+    if compute_plan_value is not None:
+        try:
+            compute_plan = OcrExecutionPlan.from_dict(compute_plan_value)
+        except ValueError as error:
+            raise ValueError("OCR compute plan is invalid") from error
+        if "deviceId" in options:
+            raise ValueError("OCR compute plan must be the only device selection")
     images: Iterable[tuple[int, bytes]]
+    page_numbers: tuple[int, ...] | None = None
     if media_type == "application/pdf":
         max_pages = options.get("maxPages")
         render_scale = options.get("renderScale")
+        base_options = {"maxPages", "renderScale", "pageManifest"}
+        plan_base_options = base_options | {"computePlan"}
+        if "pageNumbers" in options:
+            raw_page_numbers = options["pageNumbers"]
+            if (
+                not isinstance(raw_page_numbers, list)
+                or not 1 <= len(raw_page_numbers) <= 500
+                or any(
+                    type(page_number) is not int or page_number < 1
+                    for page_number in raw_page_numbers
+                )
+                or raw_page_numbers != list(range(1, len(raw_page_numbers) + 1))
+            ):
+                raise ValueError("OCR PDF page selection is invalid")
+            page_numbers = tuple(raw_page_numbers)
         if (
-            set(options) != {"deviceId", "maxPages", "renderScale"}
+            set(options)
+            not in (
+                plan_base_options,
+                plan_base_options | {"pageNumbers"},
+                plan_base_options | {"runtimeSha256"},
+                plan_base_options | {"pageNumbers", "runtimeSha256"},
+            )
             or not isinstance(max_pages, int)
             or isinstance(max_pages, bool)
             or not 1 <= max_pages <= 500
@@ -276,7 +440,16 @@ def _run(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
             or not 0.5 <= float(render_scale) <= 8
         ):
             raise ValueError("OCR PDF options are invalid")
-        images = _pdf_page_images(source, max_pages, float(render_scale), cancellation)
+        if page_numbers is None:
+            images = _pdf_page_images(source, max_pages, float(render_scale), cancellation)
+        else:
+            images = _pdf_page_images(
+                source,
+                max_pages,
+                float(render_scale),
+                cancellation,
+                page_numbers=page_numbers,
+            )
     elif media_type in {"image/png", "image/jpeg", "image/webp"}:
         max_pixels = options.get("maxImagePixels")
         scale = options.get("renderScale", 1)
@@ -288,18 +461,109 @@ def _run(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
             or not 1 <= float(scale) <= 4
         ):
             raise ValueError("OCR image renderScale is invalid")
-        images = [(1, _normalized_png(source, max_pixels, float(scale)))]
+        if len(manifest) != 1:
+            raise ValueError("OCR image page manifest must contain one page")
+        normalized_png = _normalized_png(source, max_pixels, float(scale))
+        width, height, actual_scale = _image_raster_metadata(source, normalized_png)
+        expected = manifest[0]
+        if (
+            expected.raster_width != width
+            or expected.raster_height != height
+            or abs(expected.raster_scale - actual_scale) > 1e-6
+        ):
+            raise ValueError("OCR image raster metadata does not match predictor input")
+        images = [(1, normalized_png)]
     else:
         raise ValueError("OCR mediaType is unsupported")
+    if compute_plan is None:
+        raise ValueError("OCR run requires a retained compute plan")
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    runtime_sha256_value = options.get("runtimeSha256")
+    if runtime_sha256_value is not None and (
+        not isinstance(runtime_sha256_value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", runtime_sha256_value) is None
+    ):
+        raise ValueError("OCR runtime SHA-256 is invalid")
+    runtime_sha256 = runtime_sha256_value if isinstance(runtime_sha256_value, str) else None
+    requested_page_scope = page_numbers
+    adapter = WindowsMLOcrAdapter(
+        model_path,
+        execution_plan=compute_plan,
+        stage_reporter=_report_stage,
+        source_sha256=source_sha256,
+        requested_page_scope=requested_page_scope,
+        runtime_sha256=runtime_sha256,
+    )
     segments: list[dict[str, Any]] = []
+    pages: list[dict[str, Any]] = []
     results = []
     warning_values: list[str] = []
+    result_provenance = None
+    execution_proof = None
+    header_emitted = False
     for page, image in images:
         if cancellation.is_set():
             raise InterruptedError
-        result = adapter.extract_png(image)
+        if page > len(manifest):
+            raise ValueError("OCR worker returned a page outside the manifest")
+        expected = manifest[page - 1]
+        try:
+            result = adapter.extract_png(image)
+            current_provenance = getattr(result, "provenance", None)
+            if current_provenance is None:
+                provenance_method = getattr(adapter, "provenance", None)
+                if not callable(provenance_method):
+                    raise ValueError("OCR worker result is missing resolved provenance")
+                current_provenance = provenance_method()
+            if not current_provenance.is_resolved:
+                raise ValueError("OCR worker result requires resolved provenance")
+            if result_provenance is None:
+                result_provenance = current_provenance
+            elif current_provenance != result_provenance:
+                raise ValueError("OCR worker returned changing provenance across pages")
+            normalized = _OCR_PIPELINE.normalize_observation(
+                expected,
+                result,
+                raster_scale_override=expected.raster_scale,
+                provenance_override=result_provenance,
+            )
+            page_payload = _OCR_PIPELINE.serialize_page(normalized)
+            proof_reader = getattr(adapter, "execution_proof", None)
+            current_execution_proof = proof_reader() if callable(proof_reader) else None
+            if current_execution_proof is not None:
+                if execution_proof is not None and current_execution_proof != execution_proof:
+                    raise ValueError("OCR worker returned changing execution proof")
+                execution_proof = current_execution_proof
+            if progress is not None and not header_emitted:
+                progress(
+                    {
+                        "type": "ocr-header",
+                        "pageCount": len(manifest),
+                        "pages": _OCR_PIPELINE.serialize_manifest(manifest),
+                        "provenance": result_provenance.model_dump(mode="json", by_alias=True),
+                    }
+                )
+                header_emitted = True
+        except Exception:
+            if progress is not None and header_emitted:
+                failure = CaptureFailureV2(
+                    code="ocr_page_failed",
+                    message="OCR page processing failed.",
+                    stage="extraction",
+                    retryable=True,
+                )
+                progress(
+                    {
+                        "type": "ocr-page",
+                        "page": _OCR_PIPELINE.serialize_page(
+                            _OCR_PIPELINE.failed_page(expected, failure)
+                        ),
+                    }
+                )
+            raise
         results.append(result)
-        if result.text.strip():
+        text = normalized.text
+        if text:
             segments.append(
                 {
                     "order": len(segments),
@@ -309,31 +573,50 @@ def _run(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
                     "endMs": None,
                 }
             )
+        pages.append(page_payload)
+        if progress is not None:
+            progress({"type": "ocr-page", "page": page_payload})
         if result.warning:
             warning_values.append(result.warning)
+    if len(results) != len(manifest):
+        raise ValueError("OCR worker did not complete the page manifest")
     if not results:
         raise ValueError("OCR produced no results")
     if not segments:
         _report_stage("ocr-output-empty")
         raise ValueError("OCR produced no non-empty segments")
-    provenance = results[0]
-    return {
+    if result_provenance is None or not result_provenance.is_resolved:
+        raise ValueError("OCR worker result requires resolved provenance")
+    final_payload: dict[str, Any] = {
         "segments": segments,
+        "pages": pages,
         "provenance": {
-            "engine": "windowsml-ocr",
-            "model": provenance.model,
-            "digest": provenance.digest,
-            "device": provenance.device,
+            "status": "resolved",
+            "engine": result_provenance.engine,
+            "model": result_provenance.model,
+            "modelDigest": result_provenance.model_digest,
+            "device": result_provenance.device,
+            "profileId": result_provenance.profile_id,
+            "profileSpecSha256": result_provenance.profile_spec_sha256,
         },
         "warnings": list(dict.fromkeys(warning_values)),
     }
+    if execution_proof is not None:
+        final_payload["executionProof"] = execution_proof.to_dict()
+    return final_payload
 
 
-def handle(request: WorkerRequest, cancellation: Event) -> dict[str, Any]:
+def handle(
+    request: WorkerRequest,
+    cancellation: Event,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     if request.operation == "probe":
         return _probe(request)
+    if request.operation == "preflight":
+        return _preflight(request)
     if request.operation == "run":
-        return _run(request, cancellation)
+        return _run(request, cancellation, progress)
     raise ValueError("unsupported OCR operation")
 
 

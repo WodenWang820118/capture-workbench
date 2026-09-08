@@ -11,8 +11,6 @@ from urllib.parse import urlsplit
 
 from capture_runtime.constants import CAPTURE_OLLAMA_BASE_MODEL, CAPTURE_OLLAMA_PROFILE_ID
 
-WINDOWSML_DEFAULT_DEVICE_ID = 0
-
 _CHILD_PROCESS_ENVIRONMENT_ALLOWLIST = frozenset(
     {
         "APPDATA",
@@ -117,7 +115,6 @@ class ExtractionRuntimeConfig:
     windowsml_model_dir: Path
     whisper_models_dir: Path
     temp_dir: Path
-    windowsml_device_id: int
     max_pdf_pages: int
     max_image_pixels: int
     ocr_render_scale: float
@@ -239,11 +236,10 @@ class RuntimeSettings:
         max_candidate_bytes = int(env.get("CAPTURE_MAX_CANDIDATE_BYTES", str(8 * 1024 * 1024)))
         if max_candidate_bytes <= 0:
             raise ValueError("CAPTURE_MAX_CANDIDATE_BYTES must be positive")
-        windowsml_device_id = int(
-            env.get("CAPTURE_WINDOWSML_DEVICE_ID", str(WINDOWSML_DEFAULT_DEVICE_ID))
-        )
-        if windowsml_device_id < 0:
-            raise ValueError("CAPTURE_WINDOWSML_DEVICE_ID must be non-negative")
+        if "CAPTURE_WINDOWSML_DEVICE_ID" in env:
+            raise ValueError(
+                "CAPTURE_WINDOWSML_DEVICE_ID is retired; use worker-owned OCR selection"
+            )
         max_pdf_pages = int(env.get("CAPTURE_MAX_PDF_PAGES", "200"))
         max_image_pixels = int(env.get("CAPTURE_MAX_IMAGE_PIXELS", "50000000"))
         ocr_render_scale = float(env.get("CAPTURE_OCR_RENDER_SCALE", "2"))
@@ -267,7 +263,6 @@ class RuntimeSettings:
                 env.get("CAPTURE_WHISPER_MODELS_DIR") or app_data_dir / "runtime-assets" / "whisper"
             ),
             temp_dir=Path(env.get("CAPTURE_EXTRACTION_TEMP_DIR") or app_data_dir / "temp"),
-            windowsml_device_id=windowsml_device_id,
             max_pdf_pages=max_pdf_pages,
             max_image_pixels=max_image_pixels,
             ocr_render_scale=ocr_render_scale,

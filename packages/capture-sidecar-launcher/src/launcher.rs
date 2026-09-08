@@ -18,7 +18,7 @@ use crate::{
     },
     health::{probe_ready_once, ProbeResult},
     manifest::VerifiedSidecar,
-    process::OwnedSidecarProcess,
+    process::OwnedRuntimeSession,
     SidecarConnection,
 };
 
@@ -148,7 +148,7 @@ impl Default for LaunchOptions {
 
 /// A ready sidecar and its exact process-ownership handle.
 pub struct LaunchedSidecar {
-    pub process: OwnedSidecarProcess,
+    pub process: OwnedRuntimeSession,
     pub connection: SidecarConnection,
 }
 
@@ -157,7 +157,21 @@ pub fn launch_sidecar(
     verified: &VerifiedSidecar,
     stopping: &AtomicBool,
     options: LaunchOptions,
+    spec_factory: impl FnMut(usize, Duration) -> Result<SidecarLaunchSpec, String>,
+) -> Result<LaunchedSidecar, String> {
+    launch_sidecar_with_observer(verified, stopping, options, spec_factory, |_| Ok(()))
+}
+
+/// Launches a sidecar while handing every spawned attempt to the host before
+/// readiness is probed. The observer normally stores a clone in the host's
+/// authoritative ownership state; the launcher still uses its own token for
+/// probing and retry cleanup.
+pub fn launch_sidecar_with_observer(
+    verified: &VerifiedSidecar,
+    stopping: &AtomicBool,
+    options: LaunchOptions,
     mut spec_factory: impl FnMut(usize, Duration) -> Result<SidecarLaunchSpec, String>,
+    mut observe_spawn: impl FnMut(OwnedRuntimeSession) -> Result<(), String>,
 ) -> Result<LaunchedSidecar, String> {
     if options.max_attempts == 0 || options.total_timeout.is_zero() {
         return Err("Capture runtime launch policy did not allow an attempt.".into());
@@ -178,10 +192,19 @@ pub fn launch_sidecar(
         completed_attempts = attempt_number;
         let spec = spec_factory(attempt_number, remaining)?;
         let mut command = spec.command();
-        let mut process = match OwnedSidecarProcess::spawn(&mut command) {
+        let mut process = match OwnedRuntimeSession::spawn(&mut command) {
             Ok(process) => process,
             Err(error) => return Err(error),
         };
+        if let Err(error) = observe_spawn(process.clone()) {
+            let cleanup = process.terminate().err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    format!("{error} The observed runtime attempt also failed cleanup: {cleanup}")
+                }
+                None => error,
+            });
+        }
         let timeout = options.ready_timeout.min(remaining);
         match wait_until_ready(
             &mut process,
@@ -204,7 +227,7 @@ pub fn launch_sidecar(
                 });
             }
             Err(error) => {
-                process.terminate()?;
+                process.terminate().map_err(|cleanup| cleanup.to_string())?;
                 last_failure = Some(error);
             }
         }
@@ -234,7 +257,7 @@ pub fn launch_sidecar(
 }
 
 fn wait_until_ready(
-    process: &mut OwnedSidecarProcess,
+    process: &mut OwnedRuntimeSession,
     spec: &SidecarLaunchSpec,
     manifest: &crate::SidecarManifest,
     stopping: &AtomicBool,

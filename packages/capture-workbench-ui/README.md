@@ -16,16 +16,16 @@ the same `.npmrc.example`):
 //npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
 ```
 
-The published `0.4.1` registry bytes are the synchronized v2 package
+The published `0.4.2` registry bytes are the synchronized v2 package
 candidate and have been verified against the package candidate artifact. The
 published version is immutable; any future package metadata or API change
-must use the next coordinated version (for example, `0.4.1`).
+must use the next coordinated version (for example, `0.4.2`).
 
 Install the exact published version for consumer verification:
 
 ```powershell
 $env:GITHUB_PACKAGES_TOKEN = '<read:packages token>'
-corepack pnpm add @gx-capture/capture-workbench-ui@0.4.1 --save-exact
+corepack pnpm add @gx-capture/capture-workbench-ui@0.4.2 --save-exact
 ```
 
 ## Angular integration contract
