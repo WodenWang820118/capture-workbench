@@ -16,9 +16,9 @@ use std::{
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER,
-        ERROR_NO_MORE_FILES, FILETIME, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER,
+        ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME, INVALID_HANDLE_VALUE, WAIT_FAILED,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -40,7 +40,6 @@ use windows_sys::Win32::{
 
 #[cfg(all(test, windows))]
 use windows_sys::Win32::{
-    Foundation::ERROR_ACCESS_DENIED,
     System::JobObjects::{JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK},
     System::Threading::{
         CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, PROCESS_INFORMATION, STARTUPINFOW,
@@ -145,7 +144,17 @@ impl OwnedSidecarProcess {
                     descendants_terminated,
                 });
             }
-            self.child.try_wait().map_err(|error| {
+            let root_identity = process_identity_from_handle(self.child.as_raw_handle(), root_pid)
+                .map_err(|error| {
+                    RuntimeCleanupError::new(
+                        root_pid,
+                        RuntimeCleanupErrorKind::Ownership,
+                        format!(
+                            "Owned runtime root creation identity could not be captured before Job fallback: {error}"
+                        ),
+                    )
+                })?;
+            let root_exited = self.child.try_wait().map_err(|error| {
                 RuntimeCleanupError::new(
                     root_pid,
                     RuntimeCleanupErrorKind::Liveness,
@@ -153,9 +162,9 @@ impl OwnedSidecarProcess {
                         "Owned runtime root liveness could not be proven before Job fallback: {error}"
                     ),
                 )
-            })?;
+            })?.is_some();
             self.job
-                .terminate_owned_processes()
+                .terminate_owned_processes(root_identity, root_exited)
                 .map_err(|error| {
                     RuntimeCleanupError::new(
                         root_pid,
@@ -552,13 +561,15 @@ impl OwnedRuntimeSessionState {
 }
 
 #[cfg(windows)]
-fn read_process_identity(pid: u32) -> Result<OwnedProcessIdentity, String> {
-    read_process_identity_if_present(pid)?
-        .ok_or_else(|| "The owned runtime process exited before identity capture completed.".into())
+fn read_process_identity_if_present(pid: u32) -> Result<Option<OwnedProcessIdentity>, String> {
+    read_process_identity_for_job_member(pid, None)
 }
 
 #[cfg(windows)]
-fn read_process_identity_if_present(pid: u32) -> Result<Option<OwnedProcessIdentity>, String> {
+fn read_process_identity_for_job_member(
+    pid: u32,
+    exited_root: Option<OwnedProcessIdentity>,
+) -> Result<Option<OwnedProcessIdentity>, String> {
     let handle = unsafe {
         OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -567,8 +578,21 @@ fn read_process_identity_if_present(pid: u32) -> Result<Option<OwnedProcessIdent
         )
     };
     if handle.is_null() {
-        if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
+        let error = unsafe { GetLastError() };
+        if error == ERROR_INVALID_PARAMETER {
             return Ok(None);
+        }
+        // A root that has already exited may remain in the Job process list
+        // while its Child handle is still retained.  The exact creation
+        // identity came from that handle before fallback, so an access-denied
+        // reopen for that same identity is safe to ignore.  Descendant and
+        // unknown access-denied errors remain fail-closed below.
+        if error == ERROR_ACCESS_DENIED {
+            if let Some(root) = exited_root {
+                if root.pid == pid {
+                    return Ok(Some(root));
+                }
+            }
         }
         return Err(format!(
             "The owned runtime process could not be opened for identity capture: {}",
@@ -734,7 +758,10 @@ impl WindowsJob {
         }
     }
 
-    fn owned_processes(&mut self) -> Result<Vec<OwnedProcessIdentity>, String> {
+    fn owned_processes(
+        &mut self,
+        exited_root: Option<OwnedProcessIdentity>,
+    ) -> Result<Vec<OwnedProcessIdentity>, String> {
         #[cfg(test)]
         if self.process_query_failures > 0 {
             self.process_query_failures -= 1;
@@ -786,26 +813,42 @@ impl WindowsJob {
                 unsafe { std::slice::from_raw_parts(information.ProcessIdList.as_ptr(), listed) };
             return process_ids
                 .iter()
-                .map(|raw_pid| {
+                .filter_map(|raw_pid| {
                     let pid = u32::try_from(*raw_pid)
-                        .map_err(|_| "The owned runtime Job returned an invalid process ID.")?;
-                    read_process_identity(pid)
+                        .map_err(|_| "The owned runtime Job returned an invalid process ID.");
+                    let pid = match pid {
+                        Ok(pid) => pid,
+                        Err(error) => return Some(Err(error.to_string())),
+                    };
+                    match read_process_identity_for_job_member(pid, exited_root) {
+                        Ok(Some(identity)) => Some(Ok(identity)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
                 })
                 .collect();
         }
     }
 
-    fn terminate_owned_processes(&mut self) -> Result<(), String> {
+    fn terminate_owned_processes(
+        &mut self,
+        root_identity: OwnedProcessIdentity,
+        root_exited: bool,
+    ) -> Result<(), String> {
         const MAX_PASSES: usize = 20;
+        let exited_root = root_exited.then_some(root_identity);
         for _ in 0..MAX_PASSES {
-            let processes = self.owned_processes()?;
+            let mut processes = self.owned_processes(exited_root)?;
             if processes.is_empty() {
                 return Ok(());
+            }
+            if !root_exited {
+                processes.sort_by_key(|process| same_process_identity(*process, root_identity));
             }
             for process in processes {
                 self.terminate_owned_process(process)?;
             }
-            if self.owned_processes()?.is_empty() {
+            if self.owned_processes(exited_root)?.is_empty() {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -826,7 +869,7 @@ impl WindowsJob {
                 return Err("Injected owned process termination failure.".into());
             }
         }
-        let current = self.owned_processes()?;
+        let current = self.owned_processes(None)?;
         if !current
             .iter()
             .copied()
@@ -851,7 +894,8 @@ impl WindowsJob {
         let handle = open_process_for_termination(expected.pid)?;
         if unsafe { TerminateProcess(handle.raw(), 1) } == 0 {
             return Err(format!(
-                "The owned runtime process could not be terminated: {}",
+                "The owned runtime process {} could not be terminated: {}",
+                expected.pid,
                 io::Error::last_os_error()
             ));
         }
@@ -1375,6 +1419,29 @@ mod tests {
             .expect("root exit");
 
         assert_eq!(observed.code(), Some(17));
+        assert_eq!(session.active_processes_for_test().expect("job query"), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_still_alive_with_job_termination_failure_reaps_root_and_descendant() {
+        let mut command = powershell_command(
+            "$p = Start-Process ping.exe -ArgumentList '-n','30','192.0.2.1' -WindowStyle Hidden; Start-Sleep -Seconds 30",
+        );
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let session = OwnedRuntimeSession::spawn(&mut command).expect("owned session");
+        wait_for_active_processes(&session, 2);
+        session.inject_job_termination_failure_for_test();
+
+        let proof = session
+            .terminate_and_prove()
+            .expect("fallback cleanup proof");
+
+        assert!(proof.root_reaped);
+        assert!(proof.descendants_terminated);
         assert_eq!(session.active_processes_for_test().expect("job query"), 0);
     }
 
