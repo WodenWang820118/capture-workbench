@@ -132,15 +132,12 @@ async function assertNoReparsePoint(path: string, label: string): Promise<void> 
       'Package identity rejects a symlink or junction in the packaged archive.',
     );
   }
-  const actual = normalizedPath(await realpath(path));
-  if (actual !== normalizedPath(path)) {
-    throw new Error(
-      'Package identity rejects a symlink or junction in the packaged archive.',
-    );
-  }
 }
 
-async function walkRegularArchive(root: string): Promise<void> {
+async function walkRegularArchive(
+  root: string,
+  canonicalRoot: string,
+): Promise<void> {
   await assertNoReparsePoint(root, 'Packaged archive root');
   const rootMetadata = await lstat(root);
   if (!rootMetadata.isDirectory()) {
@@ -152,6 +149,12 @@ async function walkRegularArchive(root: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const child = resolve(directory, entry.name);
       await assertNoReparsePoint(child, 'Packaged archive entry');
+      const canonicalChild = normalizedPath(await realpath(child));
+      if (!pathIsWithin(canonicalChild, canonicalRoot)) {
+        throw new Error(
+          'Packaged archive entry must stay inside the canonical archive boundary.',
+        );
+      }
       if (entry.isDirectory()) {
         pending.push(child);
       } else if (!entry.isFile()) {
@@ -167,7 +170,8 @@ async function assertArchiveBoundary(
   input: RuntimePackageIdentityInput,
 ): Promise<void> {
   const packageRoot = resolve(input.packageRoot);
-  await walkRegularArchive(packageRoot);
+  const canonicalRoot = normalizedPath(await realpath(packageRoot));
+  await walkRegularArchive(packageRoot, canonicalRoot);
   const paths = [
     ['Runtime executable', input.runtimeExecutablePath] as const,
     ...(input.ocrWorkerArchivePath
@@ -175,18 +179,25 @@ async function assertArchiveBoundary(
       : []),
   ];
   for (const [label, path] of paths) {
-    assertContained(path, packageRoot, label);
     await assertNoReparsePoint(path, label);
+    const canonicalPath = normalizedPath(await realpath(path));
+    assertContained(canonicalPath, canonicalRoot, label);
     const metadata = await lstat(path);
     if (!metadata.isFile()) throw new Error(`${label} must be a regular file.`);
   }
   for (const sourceRoot of input.sourceTreeRoots ?? []) {
-    if (pathIsWithin(packageRoot, sourceRoot)) {
+    const canonicalSourceRoot = normalizedPath(
+      await realpath(sourceRoot).catch(() => resolve(sourceRoot)),
+    );
+    if (pathIsWithin(canonicalRoot, canonicalSourceRoot)) {
       throw new Error('Package identity rejects a source-tree import.');
     }
     for (const [label, path] of paths) {
-      if (pathIsWithin(path, sourceRoot)) {
-        throw new Error(`Package identity rejects a source-tree import (${label}).`);
+      const canonicalPath = normalizedPath(await realpath(path));
+      if (pathIsWithin(canonicalPath, canonicalSourceRoot)) {
+        throw new Error(
+          `Package identity rejects a source-tree import (${label}).`,
+        );
       }
     }
   }

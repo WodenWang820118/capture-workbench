@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -23,7 +30,13 @@ async function withPackage(
     worker: string;
   }) => Promise<void>,
 ): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'capture-runtime-identity-'));
+  const fixtureRoot = await mkdtemp(
+    join(tmpdir(), 'capture-runtime-identity-'),
+  );
+  // CI may expose its temp directory through an ancestor junction. Keep the
+  // ordinary fixture canonical so the reparse tests below exercise only the
+  // path shape they name.
+  const root = await realpath(fixtureRoot);
   const runtime = join(root, 'capture-runtime.exe');
   const worker = join(root, 'capture-engine-ocr.zip');
   await writeFile(runtime, 'runtime bytes');
@@ -31,7 +44,35 @@ async function withPackage(
   try {
     await callback({ root, runtime, worker });
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function withAncestorJunctionPackage(
+  callback: (paths: {
+    root: string;
+    runtime: string;
+    worker: string;
+  }) => Promise<void>,
+): Promise<void> {
+  const fixtureRoot = await mkdtemp(
+    join(tmpdir(), 'capture-runtime-identity-ancestor-'),
+  );
+  const physicalParent = join(fixtureRoot, 'physical');
+  const physicalRoot = join(physicalParent, 'package');
+  const aliasParent = join(fixtureRoot, 'alias');
+  const root = join(aliasParent, 'package');
+  await mkdir(physicalRoot, { recursive: true });
+  await symlink(await realpath(physicalParent), aliasParent, 'junction');
+  const runtime = join(root, 'capture-runtime.exe');
+  const worker = join(root, 'capture-engine-ocr.zip');
+  await writeFile(runtime, 'runtime bytes');
+  await writeFile(worker, 'worker bytes');
+  try {
+    await callback({ root, runtime, worker });
+  } finally {
+    await rm(aliasParent, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 }
 
@@ -110,6 +151,74 @@ test('local-probe rejects a source-tree import even when the bytes match', async
       }),
       /source-tree import/u,
     );
+  });
+});
+
+test('local-probe accepts a package path below an ancestor junction', async () => {
+  await withAncestorJunctionPackage(async (paths) => {
+    assert.notEqual(await realpath(paths.root), paths.root);
+    await assert.doesNotReject(verifyRuntimePackageIdentity(localInput(paths)));
+  });
+});
+
+test('local-probe rejects an archive child junction that points outside', async () => {
+  await withPackage(async (paths) => {
+    const outsideRoot = await mkdtemp(
+      join(tmpdir(), 'capture-runtime-identity-outside-'),
+    );
+    const escape = join(paths.root, 'outside-link');
+    try {
+      await symlink(await realpath(outsideRoot), escape, 'junction');
+      await assert.rejects(
+        verifyRuntimePackageIdentity(localInput(paths)),
+        /symlink or junction/u,
+      );
+    } finally {
+      await rm(escape, { recursive: true, force: true });
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test('local-probe rejects an archive child junction even when it points inside', async () => {
+  await withPackage(async (paths) => {
+    const insideTarget = join(paths.root, 'inside-target');
+    const insideLink = join(paths.root, 'inside-link');
+    await mkdir(insideTarget);
+    try {
+      await symlink(insideTarget, insideLink, 'junction');
+      await assert.rejects(
+        verifyRuntimePackageIdentity(localInput(paths)),
+        /symlink or junction/u,
+      );
+    } finally {
+      await rm(insideLink, { recursive: true, force: true });
+      await rm(insideTarget, { recursive: true, force: true });
+    }
+  });
+});
+
+test('local-probe rejects a runtime path whose realpath escapes the canonical package root', async () => {
+  await withPackage(async (paths) => {
+    const outsideRoot = await mkdtemp(
+      join(tmpdir(), 'capture-runtime-identity-runtime-outside-'),
+    );
+    const outsideRuntime = join(outsideRoot, 'capture-runtime.exe');
+    const runtimeLinkRoot = join(paths.root, 'runtime-link');
+    const runtimeLink = join(runtimeLinkRoot, 'capture-runtime.exe');
+    try {
+      await writeFile(outsideRuntime, 'runtime bytes');
+      await symlink(await realpath(outsideRoot), runtimeLinkRoot, 'junction');
+      await assert.rejects(
+        verifyRuntimePackageIdentity(
+          localInput({ ...paths, runtime: runtimeLink }),
+        ),
+        /symlink or junction|archive boundary/u,
+      );
+    } finally {
+      await rm(runtimeLinkRoot, { recursive: true, force: true });
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 });
 
