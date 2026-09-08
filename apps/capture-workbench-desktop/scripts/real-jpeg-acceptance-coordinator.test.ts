@@ -805,6 +805,8 @@ test('the linked coordinator runs the exact baseline and canonical contract with
       canonicalExitCode: 0,
     });
     assert.deepEqual(input.parentEnvironment, originalEnvironment);
+    const canonicalFixtureRoot = await realpath(fixture.root);
+    const canonicalOwnedRoot = join(canonicalFixtureRoot, 'owned');
     const canonicalSourceRoot = await realpath(fixture.sourceRoot);
     assert.deepEqual(
       harness.copiedSources.map((source) =>
@@ -840,7 +842,7 @@ test('the linked coordinator runs the exact baseline and canonical contract with
     );
     assert.equal(
       baseline.environment.OLLAMA_MODELS,
-      join(fixture.ownedRoot, 'baseline-ollama-models'),
+      join(canonicalOwnedRoot, 'baseline-ollama-models'),
     );
     assert.equal(baseline.environment.J53_PRIVATE_CANARY, undefined);
     assert.equal(canonical.kind, 'canonical');
@@ -900,7 +902,7 @@ test('the linked coordinator runs the exact baseline and canonical contract with
     );
     assert.equal(
       canonical.environment.CAPTURE_PDF_OCR_E2E_LOCAL_MODEL_ROOT,
-      join(fixture.ownedRoot, 'model-projection'),
+      join(canonicalOwnedRoot, 'model-projection'),
     );
     assert.equal(canonical.environment.E2E_RECORD_VIDEO, '0');
     assert.equal(canonical.environment.J53_PRIVATE_CANARY, undefined);
