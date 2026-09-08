@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import {
   CaptureRuntimeProtocolError,
   type CaptureOcrProjection,
@@ -293,5 +293,27 @@ describe('DesktopRuntimeClientService', () => {
     expect(service.ready()).toBe(false);
     expect(service.ocrCompute()).toBeNull();
     expect(service.error()).toBeUndefined();
+  });
+
+  it('keeps the OCR compute accessor safe when readiness is errored', () => {
+    const commands = {
+      invoke: vi.fn((command: string) => command === 'desktop_runtime_status'
+        ? throwError(() => new Error('Capture Workbench 僅能在 Windows 桌面 App 中使用。'))
+        : of({ items: [] })),
+    };
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: DesktopTauriCommandService, useValue: commands },
+        DesktopRuntimeClientService,
+      ],
+    });
+
+    const service = TestBed.inject(DesktopRuntimeClientService);
+    TestBed.tick();
+
+    expect(service.readiness.status()).toBe('error');
+    expect(service.error()?.message).toBe('Capture Workbench 僅能在 Windows 桌面 App 中使用。');
+    expect(() => service.ocrCompute()).not.toThrow();
+    expect(service.ocrCompute()).toBeNull();
   });
 });

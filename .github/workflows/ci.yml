@@ -180,6 +180,15 @@ jobs:
         shell: pwsh
         run: pnpm nx run capture-workbench-e2e:e2e
 
+      - name: Upload reference flow Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: capture-workbench-reference-playwright-${{ github.run_id }}
+          path: dist/.playwright/apps/capture-workbench-e2e/**
+          if-no-files-found: error
+          retention-days: 7
+
       # Missing fixtures, runtime, model, or reviewed baselines fail the job;
       # this acceptance gate must never become an implicit skip.
       - name: Run real acceptance visual gate

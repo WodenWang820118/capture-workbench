@@ -64,7 +64,8 @@ export class DesktopRuntimeClientService {
   readonly resourceStatus = this.readiness.status;
   readonly error = this.readiness.error;
   readonly ocrCompute = computed<OcrComputePreflight | null>(() => {
-    const compute = this.status().ocrCompute;
+    const status = this.readiness.hasValue() ? this.readiness.value() : undefined;
+    const compute = status?.ocrCompute;
     return isOcrComputePreflight(compute) ? compute : null;
   });
   /**
@@ -72,7 +73,8 @@ export class DesktopRuntimeClientService {
    * status data fails safe to the runtime's canonical all-page behavior.
    */
   readonly pdfPageNumbers = computed<readonly number[] | undefined>(() => {
-    const pageNumbers = this.status().pdfPageNumbers;
+    const status = this.readiness.hasValue() ? this.readiness.value() : undefined;
+    const pageNumbers = status?.pdfPageNumbers;
     return isPdfPageNumbers(pageNumbers) ? [...pageNumbers] : undefined;
   });
   /** True once the native sidecar is authenticated and setup APIs are usable.
