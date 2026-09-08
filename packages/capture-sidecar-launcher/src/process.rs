@@ -31,8 +31,8 @@ use windows_sys::Win32::{
     },
     System::SystemInformation::GetSystemDirectoryW,
     System::Threading::{
-        GetProcessIdOfThread, GetProcessTimes, OpenProcess, OpenThread, ResumeThread,
-        TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+        GetExitCodeProcess, GetProcessIdOfThread, GetProcessTimes, OpenProcess, OpenThread,
+        ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
         THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
     },
@@ -561,11 +561,6 @@ impl OwnedRuntimeSessionState {
 }
 
 #[cfg(windows)]
-fn read_process_identity_if_present(pid: u32) -> Result<Option<OwnedProcessIdentity>, String> {
-    read_process_identity_for_job_member(pid, None)
-}
-
-#[cfg(windows)]
 fn read_process_identity_for_job_member(
     pid: u32,
     exited_root: Option<OwnedProcessIdentity>,
@@ -646,6 +641,69 @@ fn process_identity_from_handle(
         creation_time: (u64::from(creation_time.dwHighDateTime) << 32)
             | u64::from(creation_time.dwLowDateTime),
     })
+}
+
+/// Proves that a process handle is already terminated after a termination
+/// attempt reported `ERROR_ACCESS_DENIED` (or after a successful termination).
+///
+/// Windows can report `ERROR_ACCESS_DENIED` when `TerminateProcess` races with
+/// a short-lived process exiting.  The error is recoverable only when the
+/// handle still belongs to the exact process we opened, is signaled, and has a
+/// terminal exit code.  Every other observation remains fail-closed.
+#[cfg(windows)]
+fn classify_terminated_process(
+    handle: *mut c_void,
+    expected: OwnedProcessIdentity,
+    observed: OwnedProcessIdentity,
+) -> Result<(), String> {
+    let wait_state = unsafe { WaitForSingleObject(handle, 5_000) };
+    let exit_code = if wait_state == WAIT_OBJECT_0 {
+        let mut exit_code = 0_u32;
+        if unsafe { GetExitCodeProcess(handle, &mut exit_code) } == 0 {
+            return Err(format!(
+                "The owned runtime process exit code could not be queried: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        Ok(exit_code)
+    } else {
+        Err(match wait_state {
+            WAIT_TIMEOUT => "The owned runtime process did not exit after termination.",
+            WAIT_FAILED => "The owned runtime process wait failed.",
+            _ => "The owned runtime process returned an unknown wait state.",
+        }
+        .to_string())
+    }?;
+
+    classify_terminated_observation(expected, observed, wait_state, Ok(exit_code))
+}
+
+#[cfg(any(windows, test))]
+fn classify_terminated_observation(
+    expected: OwnedProcessIdentity,
+    observed: OwnedProcessIdentity,
+    wait_state: u32,
+    exit_code: Result<u32, String>,
+) -> Result<(), String> {
+    if !same_process_identity(expected, observed) {
+        return Err(format!(
+            "The owned runtime process {} creation identity changed before termination.",
+            expected.pid
+        ));
+    }
+    if wait_state != 0 {
+        return Err(match wait_state {
+            0x0000_0102 => "The owned runtime process did not exit after termination.",
+            0xffff_ffff => "The owned runtime process wait failed.",
+            _ => "The owned runtime process returned an unknown wait state.",
+        }
+        .into());
+    }
+    let exit_code = exit_code?;
+    if exit_code == 259 {
+        return Err("The owned runtime process exit code is still active.".into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -846,7 +904,7 @@ impl WindowsJob {
                 processes.sort_by_key(|process| same_process_identity(*process, root_identity));
             }
             for process in processes {
-                self.terminate_owned_process(process)?;
+                self.terminate_owned_process(process, exited_root)?;
             }
             if self.owned_processes(exited_root)?.is_empty() {
                 return Ok(());
@@ -859,7 +917,11 @@ impl WindowsJob {
         )
     }
 
-    fn terminate_owned_process(&mut self, expected: OwnedProcessIdentity) -> Result<(), String> {
+    fn terminate_owned_process(
+        &mut self,
+        expected: OwnedProcessIdentity,
+        exited_root: Option<OwnedProcessIdentity>,
+    ) -> Result<(), String> {
         #[cfg(test)]
         {
             let attempt = self.process_termination_attempts;
@@ -869,7 +931,7 @@ impl WindowsJob {
                 return Err("Injected owned process termination failure.".into());
             }
         }
-        let current = self.owned_processes(None)?;
+        let current = self.owned_processes(exited_root)?;
         if !current
             .iter()
             .copied()
@@ -880,7 +942,7 @@ impl WindowsJob {
                 // the next pass will handle its newly captured identity.
                 return Ok(());
             }
-            match read_process_identity_if_present(expected.pid)? {
+            match read_process_identity_for_job_member(expected.pid, exited_root)? {
                 None => return Ok(()),
                 Some(observed) if !same_process_identity(expected, observed) => return Ok(()),
                 Some(_) => {
@@ -892,22 +954,24 @@ impl WindowsJob {
             }
         }
         let handle = open_process_for_termination(expected.pid)?;
-        if unsafe { TerminateProcess(handle.raw(), 1) } == 0 {
+        let observed = process_identity_from_handle(handle.raw(), expected.pid)?;
+        if !same_process_identity(expected, observed) {
             return Err(format!(
-                "The owned runtime process {} could not be terminated: {}",
-                expected.pid,
-                io::Error::last_os_error()
+                "The owned runtime process {} creation identity changed before termination.",
+                expected.pid
             ));
         }
-        match unsafe { WaitForSingleObject(handle.raw(), 5_000) } {
-            WAIT_OBJECT_0 => Ok(()),
-            WAIT_TIMEOUT => Err("The owned runtime process did not exit after termination.".into()),
-            WAIT_FAILED => Err(format!(
-                "The owned runtime process wait failed: {}",
-                io::Error::last_os_error()
-            )),
-            _ => Err("The owned runtime process returned an unknown wait state.".into()),
+        if unsafe { TerminateProcess(handle.raw(), 1) } == 0 {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_ACCESS_DENIED {
+                return classify_terminated_process(handle.raw(), expected, observed);
+            }
+            return Err(format!(
+                "The owned runtime process {} could not be terminated: Windows error {error}.",
+                expected.pid,
+            ));
         }
+        classify_terminated_process(handle.raw(), expected, observed)
     }
 
     #[cfg(test)]
@@ -1521,6 +1585,82 @@ mod tests {
         };
         assert!(!same_process_identity(original, reused));
         assert!(same_process_identity(original, original));
+    }
+
+    #[test]
+    fn terminated_observation_requires_exact_identity_and_terminal_proof() {
+        let expected = OwnedProcessIdentity {
+            pid: 4242,
+            creation_time: 100,
+        };
+
+        assert!(classify_terminated_observation(expected, expected, 0, Ok(17)).is_ok());
+        assert!(
+            classify_terminated_observation(expected, expected, 0, Err("query".into())).is_err()
+        );
+        assert!(classify_terminated_observation(expected, expected, 0x0000_0102, Ok(17)).is_err());
+        assert!(classify_terminated_observation(expected, expected, 0xffff_ffff, Ok(17)).is_err());
+        assert!(classify_terminated_observation(expected, expected, 0xdead_beef, Ok(17)).is_err());
+        assert!(classify_terminated_observation(expected, expected, 0, Ok(259)).is_err());
+        assert!(classify_terminated_observation(
+            expected,
+            OwnedProcessIdentity {
+                pid: expected.pid,
+                creation_time: expected.creation_time + 1,
+            },
+            0,
+            Ok(17),
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_lived_child_access_denied_is_classified_from_its_signaled_handle() {
+        let mut child = Command::new("cmd.exe");
+        child
+            .args(["/D", "/S", "/C", "exit /B 17"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = child.spawn().expect("short-lived child");
+        let pid = child.id();
+        while child.try_wait().expect("child status").is_none() {
+            std::thread::yield_now();
+        }
+
+        let handle = open_process_for_termination(pid).expect("retained process handle");
+        let expected = process_identity_from_handle(handle.raw(), pid).expect("child identity");
+        let observed = process_identity_from_handle(handle.raw(), pid).expect("handle identity");
+        assert_eq!(expected, observed);
+        assert_eq!(unsafe { TerminateProcess(handle.raw(), 1) }, 0);
+        assert_eq!(unsafe { GetLastError() }, ERROR_ACCESS_DENIED);
+        classify_terminated_process(handle.raw(), expected, observed)
+            .expect("already-exited process proof");
+        child.wait().expect("reap child");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_lived_root_exit_cleanup_stress_is_sequential() {
+        for _ in 0..100 {
+            let mut command = Command::new("cmd.exe");
+            command
+                .args(["/D", "/S", "/C", "exit /B 17"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let session = OwnedRuntimeSession::spawn(&mut command).expect("owned session");
+            wait_for_root_exit(&session);
+            session.inject_job_termination_failure_for_test();
+
+            let observed = session
+                .monitor_root_exit()
+                .expect("cleanup proof")
+                .expect("root exit");
+            assert_eq!(observed.code(), Some(17));
+            assert_eq!(session.active_processes_for_test().expect("job query"), 0);
+        }
     }
 
     #[cfg(windows)]
