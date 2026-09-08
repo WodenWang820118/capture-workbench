@@ -1,7 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const workspaceRoot = resolve(import.meta.dirname, '..');
+const typescript = createRequire(import.meta.url)('typescript');
 const sourceRoots = ['apps', 'packages', 'tools'];
 const forbiddenPatterns = [
   { name: 'Promise contract', pattern: /Promise\s*</gu },
@@ -11,6 +14,16 @@ const forbiddenPatterns = [
   { name: 'firstValueFrom', pattern: /\bfirstValueFrom\b/gu },
   { name: 'lastValueFrom', pattern: /\blastValueFrom\b/gu },
 ];
+const ACCEPTANCE_SCOPE_PATH =
+  'apps/capture-workbench-desktop/scripts/acceptance-scope.ts';
+const ACCEPTANCE_SCOPE_ALLOWED_IMPORTS = new Set([
+  'node:crypto',
+  'node:child_process',
+  'node:fs/promises',
+  'node:path',
+  '../../../tools/three-project-acceptance.ts',
+  './windows-acceptance-scope-probe.ts',
+]);
 
 function collectTypescriptFiles(directory) {
   const files = [];
@@ -29,6 +42,83 @@ function collectTypescriptFiles(directory) {
     }
   }
   return files;
+}
+
+function sourceLine(source, offset) {
+  return source.slice(0, offset).split(/\r?\n/u).length;
+}
+
+export function acceptanceScopeDependencyFindings(relativePath, source) {
+  if (relativePath !== ACCEPTANCE_SCOPE_PATH) return [];
+  const findings = [];
+  const addFinding = (kind, specifier, offset) => {
+    findings.push(
+      `${relativePath}:${sourceLine(source, offset)} acceptance scope ${kind} "${specifier}" is not allowed`,
+    );
+  };
+
+  const sourceFile = typescript.createSourceFile(
+    relativePath,
+    source,
+    typescript.ScriptTarget.Latest,
+    true,
+    typescript.ScriptKind.TS,
+  );
+  if (sourceFile.parseDiagnostics.length > 0) {
+    findings.push(
+      `${relativePath}:1 acceptance scope parse diagnostics (${sourceFile.parseDiagnostics.length})`,
+    );
+    return findings;
+  }
+
+  const moduleSpecifier = (node) =>
+    node && typescript.isStringLiteralLike(node)
+      ? node.text
+      : 'module expression';
+  const visit = (node) => {
+    if (typescript.isImportDeclaration(node)) {
+      const specifier = moduleSpecifier(node.moduleSpecifier);
+      if (!ACCEPTANCE_SCOPE_ALLOWED_IMPORTS.has(specifier)) {
+        addFinding('static import', specifier, node.getStart(sourceFile));
+      }
+    } else if (
+      typescript.isExportDeclaration(node) &&
+      node.moduleSpecifier
+    ) {
+      const specifier = moduleSpecifier(node.moduleSpecifier);
+      if (!ACCEPTANCE_SCOPE_ALLOWED_IMPORTS.has(specifier)) {
+        addFinding('static export', specifier, node.getStart(sourceFile));
+      }
+    } else if (typescript.isImportEqualsDeclaration(node)) {
+      const moduleReference = node.moduleReference;
+      const specifier =
+        typescript.isExternalModuleReference(moduleReference)
+          ? moduleSpecifier(moduleReference.expression)
+          : 'module expression';
+      addFinding('import-equals', specifier, node.getStart(sourceFile));
+    } else if (
+      typescript.isCallExpression(node) &&
+      node.expression.kind === typescript.SyntaxKind.ImportKeyword
+    ) {
+      const specifier = moduleSpecifier(node.arguments[0]);
+      addFinding('dynamic import', specifier, node.getStart(sourceFile));
+    } else if (typescript.isIdentifier(node) && node.text === 'require') {
+      const parent = node.parent;
+      if (typescript.isCallExpression(parent) && parent.expression === node) {
+        const specifier = moduleSpecifier(parent.arguments[0]);
+        addFinding('require', specifier, node.getStart(sourceFile));
+      } else {
+        addFinding(
+          'require identifier',
+          'identifier reference',
+          node.getStart(sourceFile),
+        );
+      }
+    }
+    typescript.forEachChild(node, visit);
+  };
+  typescript.forEachChild(sourceFile, visit);
+  return findings;
 }
 
 function exceptionReason(relativePath) {
@@ -70,11 +160,31 @@ function exceptionReason(relativePath) {
   ) {
     return 'opt-in real-engine CLI boundary';
   }
+  if (
+    relativePath ===
+    'apps/capture-workbench-desktop/scripts/local-candidate-worker-mirror.ts'
+  ) {
+    return 'local runtime candidate OCR worker mirror process boundary';
+  }
   if (relativePath === 'apps/capture-workbench-desktop/scripts/real-ocr-result-assertions.ts') {
     return 'opt-in real-engine CLI boundary';
   }
   if (relativePath === 'apps/capture-workbench-desktop/scripts/acceptance-real.ts') {
     return 'opt-in real-engine process boundary';
+  }
+  // This exact acceptance I/O orchestration seam owns filesystem and OS probes;
+  // neighboring desktop scripts and all product/runtime/client source stay checked.
+  if (
+    relativePath ===
+    'apps/capture-workbench-desktop/scripts/acceptance-scope.ts'
+  ) {
+    return 'acceptance scope filesystem and process-observation boundary';
+  }
+  if (
+    relativePath ===
+    'apps/capture-workbench-desktop/scripts/windows-acceptance-scope-probe.ts'
+  ) {
+    return 'Windows acceptance process/listener observation deep module';
   }
   if (relativePath === 'tools/acceptance-contract.ts') {
     return 'acceptance artifact and process boundary';
@@ -184,35 +294,43 @@ function exceptionReason(relativePath) {
   return undefined;
 }
 
-const violations = [];
-const approved = [];
-for (const sourceRoot of sourceRoots) {
-  for (const file of collectTypescriptFiles(
-    resolve(workspaceRoot, sourceRoot),
-  )) {
-    const relativePath = relative(workspaceRoot, file).replaceAll('\\', '/');
-    if (relativePath === 'tools/check-async-boundary.ts') continue;
-    const reason = exceptionReason(relativePath);
-    const lines = readFileSync(file, 'utf8').split(/\r?\n/u);
-    for (const [index, line] of lines.entries()) {
-      for (const forbidden of forbiddenPatterns) {
-        forbidden.pattern.lastIndex = 0;
-        if (!forbidden.pattern.test(line)) continue;
-        const finding = `${relativePath}:${index + 1} ${forbidden.name}`;
-        if (reason) approved.push(`${finding} (${reason})`);
-        else violations.push(finding);
+function runAsyncBoundaryCheck() {
+  const violations = [];
+  const approved = [];
+  for (const sourceRoot of sourceRoots) {
+    for (const file of collectTypescriptFiles(
+      resolve(workspaceRoot, sourceRoot),
+    )) {
+      const relativePath = relative(workspaceRoot, file).replaceAll('\\', '/');
+      if (relativePath === 'tools/check-async-boundary.ts') continue;
+      const reason = exceptionReason(relativePath);
+      const source = readFileSync(file, 'utf8');
+      violations.push(...acceptanceScopeDependencyFindings(relativePath, source));
+      const lines = source.split(/\r?\n/u);
+      for (const [index, line] of lines.entries()) {
+        for (const forbidden of forbiddenPatterns) {
+          forbidden.pattern.lastIndex = 0;
+          if (!forbidden.pattern.test(line)) continue;
+          const finding = `${relativePath}:${index + 1} ${forbidden.name}`;
+          if (reason) approved.push(`${finding} (${reason})`);
+          else violations.push(finding);
+        }
       }
     }
   }
+  return { approved, violations };
 }
 
-if (violations.length > 0) {
-  process.stderr.write(
-    `Async-boundary violations (Promise/async is allowed only at approved framework boundaries):\n${violations.join('\n')}\n`,
-  );
-  process.exitCode = 1;
-} else {
-  process.stdout.write(
-    `Async-boundary check passed; ${approved.length} approved framework/test boundary occurrence(s).\n`,
-  );
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  const { approved, violations } = runAsyncBoundaryCheck();
+  if (violations.length > 0) {
+    process.stderr.write(
+      `Async-boundary violations (Promise/async is allowed only at approved framework boundaries):\n${violations.join('\n')}\n`,
+    );
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(
+      `Async-boundary check passed; ${approved.length} approved framework/test boundary occurrence(s).\n`,
+    );
+  }
 }

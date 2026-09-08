@@ -207,6 +207,12 @@ export function collectReleaseVersionEntries(
   );
   addRegex(
     entries,
+    'Java runtime client POM',
+    text(root, 'packages/capture-runtime-client-java/pom.xml'),
+    /<version>(\d+\.\d+\.\d+(?:-[^<]+)?)<\/version>/u,
+  );
+  addRegex(
+    entries,
     'Example runtime manifest',
     text(
       root,

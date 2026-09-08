@@ -10,14 +10,14 @@ test('PyPI record lane can select one project without accepting the other packag
   assert.deepEqual(
     projectArtifacts(
       [
-        'capture_runtime_client-0.4.1-py3-none-any.whl',
-        'capture_runtime_client-0.4.1.tar.gz',
+        'capture_runtime_client-0.4.2-py3-none-any.whl',
+        'capture_runtime_client-0.4.2.tar.gz',
       ],
       'capture-runtime-client',
     ),
     [
-      'capture_runtime_client-0.4.1-py3-none-any.whl',
-      'capture_runtime_client-0.4.1.tar.gz',
+      'capture_runtime_client-0.4.2-py3-none-any.whl',
+      'capture_runtime_client-0.4.2.tar.gz',
     ],
   );
   assert.throws(

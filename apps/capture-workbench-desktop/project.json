@@ -173,11 +173,24 @@
         "parallel": false
       }
     },
+    "build-nsis-acceptance": {
+      "cache": false,
+      "executor": "nx:run-commands",
+      "metadata": {
+        "description": "Builds a separately named acceptance-only NSIS bundle with the compile-time acceptance-app-data feature; never use as the release NSIS artifact."
+      },
+      "outputs": [
+        "{workspaceRoot}/output/acceptance-nsis"
+      ],
+      "options": {
+        "command": "node apps/capture-workbench-desktop/scripts/build-acceptance-nsis.ts"
+      }
+    },
     "package-qa-test": {
       "cache": true,
       "executor": "nx:run-commands",
       "options": {
-        "command": "node --test apps/capture-workbench-desktop/scripts/*.test.ts tools/acceptance-contract.test.ts tools/three-project-acceptance.test.ts tools/check-async-boundary.test.ts tools/finalize-packed-package.test.ts tools/local-release-consumer-smoke.test.ts tools/node24-corepack.test.ts tools/record-candidate-verification.test.ts"
+        "command": "node --test apps/capture-workbench-desktop/scripts/*.test.ts tools/acceptance-contract.test.ts tools/worker-stage-policy.test.ts tools/three-project-acceptance.test.ts tools/three-project-cleanup-verifier.test.ts tools/check-async-boundary.test.ts tools/finalize-packed-package.test.ts tools/local-release-consumer-smoke.test.ts tools/node24-corepack.test.ts tools/record-candidate-verification.test.ts tools/acceptance-checkpoint-journal.test.ts"
       }
     },
     "package-qa": {

@@ -321,6 +321,7 @@ test('blocking native I/O is isolated behind async Tauri commands', async () => 
     'runtime_model_options',
     'runtime_start_model_installation',
     'runtime_get_model_installation',
+    'runtime_ready',
     'runtime_create_capture',
     'runtime_get_capture',
     'runtime_cancel_capture',

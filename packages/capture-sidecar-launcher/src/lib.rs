@@ -8,14 +8,18 @@ use std::fmt;
 
 pub use health::{probe_ready_once, ProbeResult, ReadyHandshake};
 pub use launcher::{
-    generate_bearer_token, launch_sidecar, reserve_distinct_loopback_port, reserve_loopback_port,
-    LaunchOptions, LaunchedSidecar, SidecarLaunchSpec,
+    generate_bearer_token, launch_sidecar, launch_sidecar_with_observer,
+    reserve_distinct_loopback_port, reserve_loopback_port, LaunchOptions, LaunchedSidecar,
+    SidecarLaunchSpec,
 };
 pub use manifest::{
     load_manifest, validate_manifest_contract, verify_sidecar, ManifestExpectations,
     SidecarManifest, VerifiedSidecar,
 };
-pub use process::OwnedSidecarProcess;
+pub use process::{
+    OwnedRuntimeSession, OwnedSidecarProcess, RuntimeCleanupError, RuntimeCleanupErrorKind,
+    RuntimeTerminationProof,
+};
 
 /// A connection to a ready authenticated sidecar.
 #[derive(Clone, PartialEq, Eq)]
@@ -57,7 +61,7 @@ mod tests {
         let connection = SidecarConnection {
             base_url: "http://127.0.0.1:49152".into(),
             token: "secret-sidecar-token".into(),
-            runtime_version: "0.4.1".into(),
+            runtime_version: "0.4.2".into(),
             api_version: "2.0".into(),
             capture_document_schema_version: "2".into(),
         };
