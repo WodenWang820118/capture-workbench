@@ -5,3 +5,4 @@ packages/capture-runtime/tests/test_contract_set_generation.py text eol=lf
 packages/capture-runtime/src/capture_runtime/assets/contract-set.sha256 text eol=lf
 apps/capture-workbench-desktop/src-tauri/resources/capture-document-v2.schema.json -text
 packages/capture-runtime-client-python/src/capture_runtime_client/private/schemas/capture-document.schema.json -text
+packages/capture-runtime-client-java/src/main/java/com/gx/capture/runtime/client/CaptureRuntimeTypes.java text eol=lf
