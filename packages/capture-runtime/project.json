@@ -60,7 +60,7 @@
     "test": {
       "cache": true,
       "executor": "nx:run-commands",
-      "dependsOn": ["test-unit", "test-integration"],
+      "dependsOn": ["test-unit", "test-integration", "check-worker-stage-policy"],
       "metadata": {
         "description": "Compatibility aggregate for the separately collected unit and integration targets."
       },
