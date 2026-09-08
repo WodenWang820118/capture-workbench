@@ -4,12 +4,22 @@ import type {
   OcrPageProjection,
   OcrProvenance,
 } from '@gx-capture/capture-runtime-client';
-import { buildOcrEvidence } from './ocr-evidence';
+import { firstValueFrom } from 'rxjs';
+import { buildOcrEvidence as buildOcrEvidence$ } from './ocr-evidence';
 // The native mirror includes this repository-level golden fixture too; keep one exact cross-language artifact.
 // eslint-disable-next-line @nx/enforce-module-boundaries
 import goldenEvidence from '../../../../../test-fixtures/ocr-evidence-v1-golden.json';
 
 describe('buildOcrEvidence', () => {
+  it('exposes a cold Observable contract for evidence construction', () => {
+    const evidence$ = buildOcrEvidence$({
+      projection: projection(),
+      expected: expectedIdentity(),
+    });
+
+    expect(typeof evidence$.subscribe).toBe('function');
+  });
+
   it('projects a recognized OCR page into privacy-safe evidence', async () => {
     const evidence = await buildOcrEvidence({
       projection: projection(),
@@ -384,6 +394,12 @@ describe('buildOcrEvidence', () => {
     })).rejects.toThrow(/Invalid OCR evidence/u);
   });
 });
+
+function buildOcrEvidence(
+  input: Parameters<typeof buildOcrEvidence$>[0],
+) {
+  return firstValueFrom(buildOcrEvidence$(input));
+}
 
 function expectedIdentity(terminalStatus: 'completed' | 'failed' = 'completed') {
   return {

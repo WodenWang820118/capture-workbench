@@ -3,12 +3,13 @@ import {
   EMPTY,
   catchError,
   concatMap,
+  concatWith,
   defer,
   expand,
   filter,
-  firstValueFrom,
   finalize,
   from,
+  ignoreElements,
   map,
   type Observable,
   of,
@@ -579,26 +580,27 @@ export class DesktopWorkspaceCaptureService {
     host: DesktopWorkspaceCaptureHost,
   ): Observable<DesktopLibrarySummary> {
     const stage = captureJobStage(job);
-    const readCheckpoint$ = defer(async () => {
-      const raw = await firstValueFrom(this.runtime.getRaw(job.captureId));
-      if (!raw) {
-        throw new Error('Capture Runtime OCR checkpoint raw projection is unavailable.');
-      }
-      const projection = await firstValueFrom(this.runtime.getOcr(job.captureId));
-      if (
-        projection.status !== 'completed'
-        || projection.pages.some((page) => page.status === 'failed')
-      ) {
-        throw new Error('Capture Runtime OCR checkpoint is not complete.');
-      }
-      const ocrEvidence = await buildOcrEvidence({
-        projection,
-        expected: this.expectedOcrIdentity(job, active, projection.status),
-      });
-      return { raw, ocrEvidence };
-    });
-    return readCheckpoint$.pipe(
-      switchMap(({ raw, ocrEvidence }) => firstValueFrom(this.library.updateCapture({
+    return this.settleOne$(this.runtime.getRaw(job.captureId)).pipe(
+      switchMap((raw) => {
+        if (!raw) {
+          return throwError(() => new Error('Capture Runtime OCR checkpoint raw projection is unavailable.'));
+        }
+        return this.settleOne$(this.runtime.getOcr(job.captureId)).pipe(
+          switchMap((projection) => {
+            if (
+              projection.status !== 'completed'
+              || projection.pages.some((page) => page.status === 'failed')
+            ) {
+              return throwError(() => new Error('Capture Runtime OCR checkpoint is not complete.'));
+            }
+            return buildOcrEvidence({
+              projection,
+              expected: this.expectedOcrIdentity(job, active, projection.status),
+            }).pipe(map((ocrEvidence) => ({ raw, ocrEvidence })));
+          }),
+        );
+      }),
+      switchMap(({ raw, ocrEvidence }) => this.settleOne$(this.library.updateCapture({
         documentId,
         captureId: job.captureId,
         status: ocrEvidence.status,
@@ -612,8 +614,8 @@ export class DesktopWorkspaceCaptureService {
         active.lastStage = stage;
         host.reloadDocumentState(documentId);
       }),
-      switchMap(() => firstValueFrom(this.runtime.deleteCapture(job.captureId))),
-      switchMap(() => firstValueFrom(this.library.updateCapture({
+      switchMap(() => this.settleOne$(this.runtime.deleteCapture(job.captureId))),
+      switchMap(() => this.settleOne$(this.library.updateCapture({
         documentId,
         status: 'awaiting_confirmation',
         stage,
@@ -633,11 +635,11 @@ export class DesktopWorkspaceCaptureService {
       && (job.status === 'completed' || job.status === 'failed')
     ) {
       this.rememberSourceIdentity(active, job);
-      return this.runtime.getOcr(job.captureId).pipe(
-        switchMap((projection) => from(buildOcrEvidence({
+      return this.settleOne$(this.runtime.getOcr(job.captureId)).pipe(
+        switchMap((projection) => buildOcrEvidence({
           projection,
           expected: this.expectedOcrIdentity(job, active),
-        }))),
+        })),
         switchMap((evidence) => this.persistTerminalData$(
           documentId,
           job,
@@ -759,6 +761,25 @@ export class DesktopWorkspaceCaptureService {
       throw new Error('OCR evidence identity mismatch: capture source changed.');
     }
     active.sourceSha256 = sourceSha256;
+  }
+
+  /** Settle one-shot streams before handing values to the next lifecycle stage. */
+  private settleOne$<T>(source$: Observable<T>): Observable<T> {
+    return defer(() => {
+      let value!: T;
+      let emitted = false;
+      return source$.pipe(
+        take(1),
+        tap((next) => {
+          value = next;
+          emitted = true;
+        }),
+        ignoreElements(),
+        concatWith(defer(() => emitted
+          ? of(value)
+          : throwError(() => new Error('Capture lifecycle source completed without a value.')))),
+      );
+    });
   }
 
   private cleanupAfterCommit$(

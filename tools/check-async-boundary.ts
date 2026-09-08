@@ -146,6 +146,33 @@ function exceptionReason(relativePath) {
   if (relativePath === 'apps/capture-workbench/src/app/app.config.ts') {
     return 'Angular bootstrap provider boundary';
   }
+  if (relativePath === 'apps/capture-workbench-desktop/scripts/acceptance-nsis.ts') {
+    return 'NSIS acceptance packaging process boundary';
+  }
+  if (relativePath === 'apps/capture-workbench-desktop/scripts/acceptance-orchestration.ts') {
+    return 'desktop acceptance orchestration process boundary';
+  }
+  if (relativePath === 'apps/capture-workbench-desktop/scripts/build-acceptance-nsis.ts') {
+    return 'NSIS acceptance installer build process boundary';
+  }
+  if (relativePath === 'apps/capture-workbench-desktop/scripts/local-candidate-model.ts') {
+    return 'local candidate model asset process boundary';
+  }
+  if (relativePath === 'apps/capture-workbench-desktop/scripts/ocr-semantic-evidence.ts') {
+    return 'real OCR semantic evidence CLI boundary';
+  }
+  if (relativePath === 'apps/capture-workbench-desktop/scripts/real-jpeg-acceptance-coordinator.ts') {
+    return 'real JPEG acceptance process boundary';
+  }
+  if (relativePath === 'tools/acceptance-checkpoint-journal.ts') {
+    return 'acceptance checkpoint journal filesystem boundary';
+  }
+  if (relativePath === 'tools/python-candidate-index.ts') {
+    return 'Python candidate artifact index CLI boundary';
+  }
+  if (relativePath === 'tools/windows-built-in-process-resolver.ts') {
+    return 'Windows process observation CLI boundary';
+  }
   if (
     relativePath ===
       'apps/capture-workbench-desktop/scripts/real-desktop-ocr-smoke.ts' ||

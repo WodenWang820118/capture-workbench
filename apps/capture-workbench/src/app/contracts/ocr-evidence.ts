@@ -4,6 +4,7 @@ import type {
   OcrPageProjection,
   OcrProvenance,
 } from '@gx-capture/capture-runtime-client';
+import { defer, from, map, throwError, type Observable } from 'rxjs';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const MODEL_DIGEST = /^sha256:[a-f0-9]{64}$/u;
@@ -98,25 +99,28 @@ export class OcrEvidenceValidationError extends Error {
  * Build one deterministic, content-free evidence record from a runtime OCR projection.
  * The projection's text, box text, and polygon coordinates are validation inputs only.
  */
-export async function buildOcrEvidence(input: OcrEvidenceInput): Promise<OcrEvidenceV1> {
-  const expected = validateExpectedIdentity(input?.expected);
-  const projection = validateProjection(input?.projection, expected);
-  const provenance = toEvidenceProvenance(projection, expected.workerSha256);
-  const internalPages = projection.pages.map((page) => toInternalEvidencePage(page));
-  const pages = internalPages.map(({ evidence }) => evidence);
-  const evidenceWithoutDigest = {
-    schemaVersion: 1 as const,
-    captureId: projection.captureId,
-    sourceSha256: expected.sourceSha256,
-    status: projection.status,
-    pageCount: projection.pageCount,
-    pages,
-    summary: summarizePages(internalPages),
-    provenance,
-    ...(projection.failure ? { failure: toEvidenceFailure(projection.failure) } : {}),
-  };
-  const digest = await sha256(canonicalJson(evidenceWithoutDigest));
-  return { ...evidenceWithoutDigest, digest };
+export function buildOcrEvidence(input: OcrEvidenceInput): Observable<OcrEvidenceV1> {
+  return defer(() => {
+    const expected = validateExpectedIdentity(input?.expected);
+    const projection = validateProjection(input?.projection, expected);
+    const provenance = toEvidenceProvenance(projection, expected.workerSha256);
+    const internalPages = projection.pages.map((page) => toInternalEvidencePage(page));
+    const pages = internalPages.map(({ evidence }) => evidence);
+    const evidenceWithoutDigest = {
+      schemaVersion: 1 as const,
+      captureId: projection.captureId,
+      sourceSha256: expected.sourceSha256,
+      status: projection.status,
+      pageCount: projection.pageCount,
+      pages,
+      summary: summarizePages(internalPages),
+      provenance,
+      ...(projection.failure ? { failure: toEvidenceFailure(projection.failure) } : {}),
+    };
+    return sha256$(canonicalJson(evidenceWithoutDigest)).pipe(
+      map((digest) => ({ ...evidenceWithoutDigest, digest })),
+    );
+  });
 }
 
 function validateExpectedIdentity(value: unknown): OcrEvidenceExpectedIdentity {
@@ -401,11 +405,15 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(recordValue).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(recordValue[key])}`).join(',')}}`;
 }
 
-async function sha256(value: string): Promise<string> {
-  if (!globalThis.crypto?.subtle) throw new OcrEvidenceValidationError('WebCrypto SHA-256 is unavailable');
+function sha256$(value: string): Observable<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    return throwError(() => new OcrEvidenceValidationError('WebCrypto SHA-256 is unavailable'));
+  }
   const bytes = new TextEncoder().encode(value);
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return defer(() => from(subtle.digest('SHA-256', bytes))).pipe(
+    map((digest) => Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')),
+  );
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
