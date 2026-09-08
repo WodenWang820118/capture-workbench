@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -51,11 +51,27 @@ function descriptorForFixture(): LocalCandidateModelDescriptor {
   };
 }
 
-async function createModelFixture(): Promise<{
+async function createModelFixture(options: {
+  readonly ancestorAlias?: boolean;
+} = {}): Promise<{
   readonly root: string;
   readonly descriptor: LocalCandidateModelDescriptor;
+  readonly physicalRoot?: string;
+  readonly aliasRoot?: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), 'capture-local-candidate-model-'));
+  const physicalRoot = await mkdtemp(join(tmpdir(), 'capture-local-candidate-model-'));
+  let root = physicalRoot;
+  let aliasRoot: string | undefined;
+  if (options.ancestorAlias) {
+    aliasRoot = join(
+      tmpdir(),
+      `capture-local-candidate-model-alias-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    await symlink(physicalRoot, aliasRoot, 'junction');
+    assert.notEqual(await realpath(aliasRoot), aliasRoot);
+    root = join(aliasRoot, 'run');
+    await mkdir(root, { recursive: true });
+  }
   const descriptor = descriptorForFixture();
   for (const [path, contents] of MODEL_FILES) {
     const filePath = join(root, ...path.split('/'));
@@ -63,7 +79,11 @@ async function createModelFixture(): Promise<{
     await writeFile(filePath, contents, 'utf8');
   }
   await writeFile(join(root, 'transport-manifest.json'), 'untrusted control\n', 'utf8');
-  return { root, descriptor };
+  return {
+    root,
+    descriptor,
+    ...(options.ancestorAlias ? { physicalRoot, aliasRoot } : {}),
+  };
 }
 
 async function verifyFixture(
@@ -150,6 +170,24 @@ test('local candidate model verification binds the exact descriptor set without 
     assert.doesNotMatch(JSON.stringify(identity), /capture-local-candidate-model|[A-Za-z]:[\\/]/u);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+    await rm(candidate.root, { recursive: true, force: true });
+  }
+});
+
+test('local candidate model verification accepts a model root under an ancestor junction alias', async () => {
+  const fixture = await createModelFixture({ ancestorAlias: true });
+  const candidate = await createCandidateFixture(fixture.descriptor);
+  try {
+    await assert.doesNotReject(() => verifyLocalCandidateModel({
+      candidateRoot: candidate.root,
+      candidateId: candidate.candidateId,
+      modelRoot: fixture.root,
+      requirementId: 'windowsml-ocr',
+    }));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+    if (fixture.aliasRoot) await rm(fixture.aliasRoot, { force: true });
+    if (fixture.physicalRoot) await rm(fixture.physicalRoot, { recursive: true, force: true });
     await rm(candidate.root, { recursive: true, force: true });
   }
 });

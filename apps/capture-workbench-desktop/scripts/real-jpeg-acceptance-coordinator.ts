@@ -32,6 +32,13 @@ import {
 import { assertStrictDescendant } from './contracts/installed.ts';
 import { createTrackedProcessTreeTerminator } from './installed-process-cleanup.ts';
 import {
+  assertCanonicalAuthorityContainment,
+  openFilesystemAuthority,
+  type FilesystemAuthority,
+  type FilesystemAuthorityFileAdapter,
+  type FilesystemAuthorityFileStat,
+} from './filesystem-authority.ts';
+import {
   parseLocalCandidateModelDescriptor,
   verifyLocalCandidateModel,
   type LocalCandidateModelDescriptor,
@@ -134,16 +141,7 @@ export interface RealJpegAcceptanceChild {
   waitForExit(): Promise<number>;
 }
 
-interface FileStat {
-  readonly size: number;
-  isDirectory(): boolean;
-  isFile(): boolean;
-  isSymbolicLink(): boolean;
-}
-
-export interface RealJpegAcceptanceFileAdapter {
-  lstat(path: string): Promise<FileStat>;
-  realpath(path: string): Promise<string>;
+export interface RealJpegAcceptanceFileAdapter extends FilesystemAuthorityFileAdapter {
   mkdir(
     path: string,
     options?: { readonly recursive?: boolean },
@@ -247,6 +245,7 @@ export async function runRealJpegAcceptance(
   };
   let cleanupFailureCode: RealJpegAcceptanceCleanupFailureCode | undefined;
   let ownedRoot: string | undefined;
+  let ownedRootAuthority: FilesystemAuthority | undefined;
   let ownedRootCreated = false;
   let baselineChild: RealJpegAcceptanceChild | undefined;
   let baselineOwnership: BaselineOwnership | undefined;
@@ -288,8 +287,9 @@ export async function runRealJpegAcceptance(
           input,
           ownedRoot,
           adapter.files,
-          () => {
+          (authority) => {
             ownedRootCreated = true;
+            ownedRootAuthority = authority;
           },
         );
         state.projectionVerified = true;
@@ -333,7 +333,7 @@ export async function runRealJpegAcceptance(
           }
         } else {
           const baselineModelsRoot = await createBaselineModelsRoot(
-            ownedRoot,
+            ownedRootAuthority,
             adapter.files,
           );
 
@@ -444,7 +444,7 @@ export async function runRealJpegAcceptance(
       if (!baselineCleanup.clean) cleanupFailureCode = 'baseline_cleanup_failed';
     }
     if (ownedRoot && ownedRootCreated && cleanupFailureCode === undefined) {
-      if (!(await removeOwnedRoot(ownedRoot, adapter.files))) {
+      if (!(await removeOwnedRoot(ownedRootAuthority, adapter.files))) {
         cleanupFailureCode = 'owned_root_cleanup_failed';
       }
     }
@@ -496,27 +496,29 @@ async function createVerifiedProjection(
   input: RealJpegAcceptanceInput,
   ownedRoot: string,
   files: RealJpegAcceptanceFileAdapter,
-  onOwnedRootCreated: () => void,
+  onOwnedRootCreated: (authority: FilesystemAuthority) => void,
 ): Promise<string> {
   const existing = await files.lstat(ownedRoot).catch(() => undefined);
   if (existing) throw new CoordinatorFailure('projection_materialization_failed');
-  let canonicalOwnershipRoot: string;
+  let ownershipAuthority: FilesystemAuthority;
+  let ownedParentAuthority: FilesystemAuthority;
+  let createdOwnedRootAuthority: FilesystemAuthority;
   try {
-    canonicalOwnershipRoot = await requireRegularUnlinkedRoot(
+    ownershipAuthority = await openFilesystemAuthority(
       input.ownershipRoot,
       files,
+      'J53 ownership root',
     );
-    const ownedParent = await requireRegularUnlinkedRoot(
+    ownedParentAuthority = await openFilesystemAuthority(
       dirname(ownedRoot),
       files,
+      'J53 owned-root parent',
     );
-    if (!samePath(ownedParent, canonicalOwnershipRoot)) {
-      assertStrictDescendant(
-        canonicalOwnershipRoot,
-        ownedParent,
-        'J53 owned-root parent',
-      );
-    }
+    assertCanonicalAuthorityContainment(
+      ownershipAuthority,
+      ownedParentAuthority,
+      'J53 owned-root parent',
+    );
   } catch {
     throw new CoordinatorFailure('projection_materialization_failed');
   }
@@ -535,19 +537,26 @@ async function createVerifiedProjection(
   }
   try {
     await files.mkdir(ownedRoot, { recursive: false });
-    onOwnedRootCreated();
-    await requireRegularUnlinkedRoot(ownedRoot, files);
+    createdOwnedRootAuthority = await openFilesystemAuthority(
+      ownedRoot,
+      files,
+      'J53 owned root',
+    );
+    assertCanonicalAuthorityContainment(
+      ownershipAuthority,
+      createdOwnedRootAuthority,
+      'J53 owned root',
+    );
+    onOwnedRootCreated(createdOwnedRootAuthority);
   } catch {
     throw new CoordinatorFailure('projection_materialization_failed');
   }
-  const temporaryRoot = assertStrictDescendant(
-    ownedRoot,
-    join(ownedRoot, 'model-projection.partial'),
+  const temporaryRoot = createdOwnedRootAuthority.child(
+    join(createdOwnedRootAuthority.canonicalRoot, 'model-projection.partial'),
     'Temporary model projection',
   );
-  const projectionRoot = assertStrictDescendant(
-    ownedRoot,
-    join(ownedRoot, 'model-projection'),
+  const projectionRoot = createdOwnedRootAuthority.child(
+    join(createdOwnedRootAuthority.canonicalRoot, 'model-projection'),
     'Model projection',
   );
   try {
@@ -562,6 +571,16 @@ async function createVerifiedProjection(
     throw new CoordinatorFailure('projection_materialization_failed');
   }
   try {
+    const projectionAuthority = await openFilesystemAuthority(
+      projectionRoot,
+      files,
+      'Model projection',
+    );
+    assertCanonicalAuthorityContainment(
+      createdOwnedRootAuthority,
+      projectionAuthority,
+      'Model projection',
+    );
     await assertProjectionControlFileAbsent(projectionRoot, files);
     await verifyLocalCandidateModel({
       candidateRoot: input.runtimeCandidateRoot,
@@ -599,22 +618,32 @@ async function materializeDescriptorProjection(
   descriptor: LocalCandidateModelDescriptor,
   files: RealJpegAcceptanceFileAdapter,
 ): Promise<void> {
-  const sourceRoot = await requireRegularUnlinkedRoot(sourceRootInput, files);
+  const sourceAuthority = await openFilesystemAuthority(
+    sourceRootInput,
+    files,
+    'Descriptor source root',
+  );
   await files.mkdir(temporaryRoot, { recursive: false });
-  await requireRegularUnlinkedRoot(temporaryRoot, files);
+  const temporaryAuthority = await openFilesystemAuthority(
+    temporaryRoot,
+    files,
+    'Temporary model projection',
+  );
   let copiedBytes = 0;
   for (const descriptorFile of descriptor.files) {
-    const source = assertStrictDescendant(
-      sourceRoot,
-      join(sourceRoot, ...descriptorFile.path.split('/')),
+    const source = sourceAuthority.child(
+      join(sourceAuthority.canonicalRoot, ...descriptorFile.path.split('/')),
       'Descriptor source file',
     );
-    const target = assertStrictDescendant(
-      temporaryRoot,
-      join(temporaryRoot, ...descriptorFile.path.split('/')),
+    const target = temporaryAuthority.child(
+      join(temporaryAuthority.canonicalRoot, ...descriptorFile.path.split('/')),
       'Descriptor projection file',
     );
-    const sourceMetadata = await files.lstat(source);
+    const canonicalSource = await sourceAuthority.resolveFile(
+      source,
+      'Canonical descriptor source file',
+    );
+    const sourceMetadata = await files.lstat(canonicalSource);
     if (
       !sourceMetadata.isFile() ||
       sourceMetadata.isSymbolicLink() ||
@@ -622,26 +651,17 @@ async function materializeDescriptorProjection(
     ) {
       throw new Error('real_jpeg_acceptance_source_file_invalid');
     }
-    const canonicalSource = await files.realpath(source);
-    assertStrictDescendant(sourceRoot, canonicalSource, 'Canonical descriptor source file');
-    if (!samePath(canonicalSource, source)) {
-      throw new Error('real_jpeg_acceptance_source_file_linked');
-    }
-    if (await sha256File(source) !== descriptorFile.sha256) {
+    if (await sha256File(canonicalSource) !== descriptorFile.sha256) {
       throw new Error('real_jpeg_acceptance_source_file_digest_invalid');
     }
     const targetParent = dirname(target);
     await files.mkdir(targetParent, { recursive: true });
-    const canonicalParent = await files.realpath(targetParent);
-    assertStrictDescendant(temporaryRoot, canonicalParent, 'Projection parent directory');
-    if (!samePath(canonicalParent, targetParent)) {
-      throw new Error('real_jpeg_acceptance_projection_parent_linked');
-    }
-    const parentMetadata = await files.lstat(targetParent);
-    if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink()) {
-      throw new Error('real_jpeg_acceptance_projection_parent_invalid');
-    }
-    await files.copyFile(source, target, fsConstants.COPYFILE_EXCL);
+    await temporaryAuthority.resolveDirectory(
+      targetParent,
+      'Projection parent directory',
+    );
+    await files.copyFile(canonicalSource, target, fsConstants.COPYFILE_EXCL);
+    await temporaryAuthority.resolveFile(target, 'Descriptor projection file');
     copiedBytes += descriptorFile.bytes;
   }
   if (copiedBytes !== descriptor.extractedBytes) {
@@ -649,34 +669,31 @@ async function materializeDescriptorProjection(
   }
 }
 
-async function requireRegularUnlinkedRoot(
-  inputPath: string,
-  files: RealJpegAcceptanceFileAdapter,
-): Promise<string> {
-  const root = resolve(inputPath);
-  const metadata = await files.lstat(root);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error('real_jpeg_acceptance_root_invalid');
-  }
-  const canonical = await files.realpath(root);
-  if (!samePath(canonical, root)) {
-    throw new Error('real_jpeg_acceptance_root_linked');
-  }
-  return canonical;
-}
-
 async function createBaselineModelsRoot(
-  ownedRoot: string,
+  ownedRoot: FilesystemAuthority | undefined,
   files: RealJpegAcceptanceFileAdapter,
 ): Promise<string> {
+  if (!ownedRoot) {
+    throw new CoordinatorFailure('projection_materialization_failed');
+  }
   const baselineModelsRoot = assertStrictDescendant(
-    ownedRoot,
-    join(ownedRoot, 'baseline-ollama-models'),
+    ownedRoot.canonicalRoot,
+    join(ownedRoot.canonicalRoot, 'baseline-ollama-models'),
     'Baseline Ollama models directory',
   );
   try {
     await files.mkdir(baselineModelsRoot, { recursive: false });
-    return await requireRegularUnlinkedRoot(baselineModelsRoot, files);
+    const authority = await openFilesystemAuthority(
+      baselineModelsRoot,
+      files,
+      'Baseline Ollama models directory',
+    );
+    assertCanonicalAuthorityContainment(
+      ownedRoot,
+      authority,
+      'Baseline Ollama models directory',
+    );
+    return authority.canonicalRoot;
   } catch {
     throw new CoordinatorFailure('projection_materialization_failed');
   }
@@ -1166,25 +1183,30 @@ async function inspectReleasedBaselinePort(
 }
 
 async function removeOwnedRoot(
-  ownedRoot: string,
+  ownedRoot: FilesystemAuthority | undefined,
   files: RealJpegAcceptanceFileAdapter,
 ): Promise<boolean> {
-  let metadata: FileStat;
+  if (!ownedRoot) return false;
+  const ownedRootPath = ownedRoot.lexicalRoot;
+  let metadata: FilesystemAuthorityFileStat;
   try {
-    metadata = await files.lstat(ownedRoot);
+    metadata = await files.lstat(ownedRootPath);
   } catch (error) {
     return errorCode(error) === 'ENOENT';
   }
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
   try {
-    const canonical = await files.realpath(ownedRoot);
-    if (!samePath(canonical, ownedRoot)) return false;
-    await files.rm(ownedRoot, { recursive: true, force: true });
+    const canonical = await ownedRoot.resolveDirectory(
+      ownedRootPath,
+      'J53 owned root',
+    );
+    if (!samePath(canonical, ownedRoot.canonicalRoot)) return false;
+    await files.rm(ownedRootPath, { recursive: true, force: true });
   } catch {
     return false;
   }
   try {
-    await files.lstat(ownedRoot);
+    await files.lstat(ownedRootPath);
     return false;
   } catch (error) {
     return errorCode(error) === 'ENOENT';

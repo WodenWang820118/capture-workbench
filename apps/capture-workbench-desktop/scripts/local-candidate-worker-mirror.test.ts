@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   truncate,
@@ -37,6 +38,8 @@ interface CandidateFixture {
   readonly candidateManifestPath: string;
   readonly candidateArchive: Buffer;
   readonly filesManifest: Buffer;
+  readonly physicalRoot?: string;
+  readonly aliasRoot?: string;
   candidateId: string;
 }
 
@@ -171,8 +174,21 @@ async function rebindCandidate(
 
 async function createFixture(options: {
   readonly includeCanonicalMemberPaths?: boolean;
+  readonly ancestorAlias?: boolean;
 } = {}): Promise<CandidateFixture> {
-  const root = await mkdtemp(join(tmpdir(), 'capture-local-worker-mirror-'));
+  const physicalRoot = await mkdtemp(join(tmpdir(), 'capture-local-worker-mirror-'));
+  let root = physicalRoot;
+  let aliasRoot: string | undefined;
+  if (options.ancestorAlias) {
+    aliasRoot = join(
+      tmpdir(),
+      `capture-local-worker-mirror-alias-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    await symlink(physicalRoot, aliasRoot, 'junction');
+    assert.notEqual(await realpath(aliasRoot), aliasRoot);
+    root = join(aliasRoot, 'run');
+    await mkdir(root, { recursive: true });
+  }
   const candidateRoot = join(root, 'candidate');
   const sourceDist = join(root, 'source-dist');
   const candidateArchive = Buffer.from('candidate archive bytes');
@@ -202,6 +218,7 @@ async function createFixture(options: {
     candidateManifestPath: join(candidateRoot, 'candidate-manifest.json'),
     candidateArchive,
     filesManifest,
+    ...(options.ancestorAlias ? { physicalRoot, aliasRoot } : {}),
     candidateId: '',
   };
   await mkdir(join(candidateRoot, 'runtime'), { recursive: true });
@@ -280,6 +297,27 @@ test('local candidate mirror serves the verified candidate archive when source d
     await assert.rejects(requestBytes(`${mirror.baseUrl}/${encodeURIComponent(fixture.archiveName)}`));
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('local candidate mirror accepts a candidate catalog under an ancestor junction alias', async () => {
+  const fixture = await createFixture({ ancestorAlias: true });
+  try {
+    const mirror = await startLocalCandidateWorkerMirror({
+      candidateRoot: fixture.candidateRoot,
+      candidateId: fixture.candidateId,
+      requirementId: 'windowsml-ocr',
+    });
+    try {
+      assert.equal(mirror.identity.candidateId, fixture.candidateId);
+      assert.equal(mirror.identity.archiveSha256, sha256(fixture.candidateArchive));
+    } finally {
+      await mirror.close();
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+    if (fixture.aliasRoot) await rm(fixture.aliasRoot, { force: true });
+    if (fixture.physicalRoot) await rm(fixture.physicalRoot, { recursive: true, force: true });
   }
 });
 

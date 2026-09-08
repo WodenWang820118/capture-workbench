@@ -11,6 +11,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -123,6 +124,8 @@ interface Fixture {
   readonly candidateRoot: string;
   readonly candidateId: string;
   readonly ownedRoot: string;
+  readonly physicalRoot?: string;
+  readonly aliasRoot?: string;
 }
 
 interface Harness {
@@ -181,8 +184,20 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-async function createFixture(): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), 'capture-j53-coordinator-'));
+async function createFixture(options: { readonly ancestorAlias?: boolean } = {}): Promise<Fixture> {
+  const physicalRoot = await mkdtemp(join(tmpdir(), 'capture-j53-coordinator-'));
+  let root = physicalRoot;
+  let aliasRoot: string | undefined;
+  if (options.ancestorAlias) {
+    aliasRoot = join(
+      tmpdir(),
+      `capture-j53-coordinator-alias-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    await symlink(physicalRoot, aliasRoot, 'junction');
+    assert.notEqual(await realpath(aliasRoot), aliasRoot);
+    root = join(aliasRoot, 'run');
+    await mkdir(root, { recursive: true });
+  }
   const sourceRoot = join(root, 'source-model');
   const candidateRoot = join(root, 'candidate');
   const ownedRoot = join(root, 'owned');
@@ -249,7 +264,14 @@ async function createFixture(): Promise<Fixture> {
     join(candidateRoot, 'candidate-manifest.json'),
     JSON.stringify({ ...manifestBase, candidateId }),
   );
-  return { root, sourceRoot, candidateRoot, candidateId, ownedRoot };
+  return {
+    root,
+    sourceRoot,
+    candidateRoot,
+    candidateId,
+    ownedRoot,
+    ...(options.ancestorAlias ? { physicalRoot, aliasRoot } : {}),
+  };
 }
 
 function inputFor(fixture: Fixture): RealJpegAcceptanceInput {
@@ -914,6 +936,32 @@ test('the linked coordinator runs the exact baseline and canonical contract with
     await assert.rejects(lstat(fixture.ownedRoot), { code: 'ENOENT' });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('the coordinator accepts an ancestor junction alias while preserving the baseline and canonical launches', async () => {
+  const fixture = await createFixture({ ancestorAlias: true });
+  const input = inputFor(fixture);
+  const harness = createHarness(input.baselinePort);
+  try {
+    const result = await runRealJpegAcceptance(input, harness.adapter);
+
+    assert.deepEqual(result, {
+      status: 'passed',
+      projectionVerified: true,
+      baselinePreserved: true,
+      cleanupComplete: true,
+      canonicalStarted: true,
+      canonicalExitCode: 0,
+    });
+    assert.deepEqual(
+      harness.requests.map((request) => request.kind),
+      ['baseline', 'canonical'],
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+    if (fixture.aliasRoot) await rm(fixture.aliasRoot, { force: true });
+    if (fixture.physicalRoot) await rm(fixture.physicalRoot, { recursive: true, force: true });
   }
 });
 

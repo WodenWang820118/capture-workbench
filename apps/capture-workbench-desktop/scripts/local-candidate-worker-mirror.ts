@@ -1,14 +1,17 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
-  lstat,
   readFile,
-  realpath,
   stat,
 } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import net from 'node:net';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, join } from 'node:path';
+
+import {
+  openFilesystemAuthority,
+  type FilesystemAuthority,
+} from './filesystem-authority.ts';
 
 const LOCAL_CANDIDATE_RUNTIME_VERSION = '0.4.2';
 const CANDIDATE_MANIFEST_PATH = 'candidate-manifest.json';
@@ -184,7 +187,7 @@ async function verifyCandidateWorker(
   options: StartLocalCandidateWorkerMirrorOptions,
 ): Promise<VerifiedWorkerArchive> {
   const verifiedCatalog = await verifyCandidateCatalog(options);
-  const { artifacts, candidateRoot, requirement } = verifiedCatalog;
+  const { artifacts, candidateAuthority, candidateRoot, requirement } = verifiedCatalog;
   const requirementArtifacts = requirement.artifacts;
   if (!Array.isArray(requirementArtifacts)) {
     throw new Error('Runtime candidate OCR worker descriptors are invalid.');
@@ -203,7 +206,7 @@ async function verifyCandidateWorker(
   );
   const archivePath = join(candidateRoot, 'runtime', descriptor.fileName);
   const archiveDigest = await digestCandidateArtifact(
-    candidateRoot,
+    candidateAuthority,
     archivePath,
     archiveEntry,
     'Runtime candidate OCR worker archive',
@@ -223,7 +226,7 @@ async function verifyCandidateWorker(
   );
   const filesManifestPath = join(candidateRoot, 'runtime', filesManifestFileName);
   const filesManifestBytes = await readCandidateArtifact(
-    candidateRoot,
+    candidateAuthority,
     filesManifestPath,
     filesManifestEntry,
     'Runtime candidate OCR worker files manifest',
@@ -286,6 +289,7 @@ export async function readVerifiedLocalCandidateCatalog(
 
 interface VerifiedCandidateCatalog extends VerifiedLocalCandidateCatalog {
   readonly candidateRoot: string;
+  readonly candidateAuthority: FilesystemAuthority;
   readonly catalog: Readonly<Record<string, unknown>>;
   readonly artifacts: readonly CandidateArtifact[];
 }
@@ -299,10 +303,15 @@ async function verifyCandidateCatalog(
   if (!DIGEST_PATTERN.test(options.candidateId)) {
     throw new Error('Local candidate worker mirror candidate ID is invalid.');
   }
-  const candidateRoot = await requireCandidateDirectory(options.candidateRoot);
+  const candidateAuthority = await openFilesystemAuthority(
+    options.candidateRoot,
+    undefined,
+    'Runtime candidate root',
+  );
+  const candidateRoot = candidateAuthority.canonicalRoot;
   const candidateManifestPath = join(candidateRoot, CANDIDATE_MANIFEST_PATH);
   const candidateManifestBytes = await readCandidateFile(
-    candidateRoot,
+    candidateAuthority,
     candidateManifestPath,
     'Runtime candidate manifest',
   );
@@ -345,7 +354,7 @@ async function verifyCandidateCatalog(
   const catalogEntry = findUniqueArtifact(artifacts, CATALOG_PATH, 'Runtime candidate catalog');
   const catalogPath = join(candidateRoot, 'runtime', 'capture-engine-catalog.json');
   const catalogBytes = await readCandidateArtifact(
-    candidateRoot,
+    candidateAuthority,
     catalogPath,
     catalogEntry,
     'Runtime candidate catalog',
@@ -371,6 +380,7 @@ async function verifyCandidateCatalog(
   }
   return {
     candidateRoot,
+    candidateAuthority,
     candidateId: options.candidateId,
     catalogSha256: sha256Bytes(catalogBytes),
     catalog,
@@ -379,39 +389,24 @@ async function verifyCandidateCatalog(
   };
 }
 
-async function requireCandidateDirectory(inputPath: string): Promise<string> {
-  const input = resolve(inputPath);
-  const metadata = await lstat(input).catch(() => undefined);
-  if (!metadata?.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error('Runtime candidate root must be a regular directory.');
-  }
-  const root = await realpath(input).catch(() => {
-    throw new Error('Runtime candidate root could not be resolved.');
-  });
-  if (root.toLowerCase() !== input.toLowerCase()) {
-    throw new Error('Runtime candidate root must not resolve through a link.');
-  }
-  return root;
-}
-
 async function readCandidateFile(
-  root: string,
+  authority: FilesystemAuthority,
   path: string,
   label: string,
 ): Promise<Buffer> {
-  const actual = await requireCandidateFile(root, path, label);
+  const actual = await requireCandidateFile(authority, path, label);
   return readFile(actual).catch(() => {
     throw new Error(`${label} could not be read.`);
   });
 }
 
 async function readCandidateArtifact(
-  root: string,
+  authority: FilesystemAuthority,
   path: string,
   artifact: CandidateArtifact,
   label: string,
 ): Promise<Buffer> {
-  const bytes = await readCandidateFile(root, path, label);
+  const bytes = await readCandidateFile(authority, path, label);
   if (bytes.length !== artifact.bytes || sha256Bytes(bytes) !== artifact.sha256) {
     throw new Error(`${label} bytes do not match the candidate manifest.`);
   }
@@ -424,12 +419,12 @@ interface CandidateFileDigest {
 }
 
 async function digestCandidateArtifact(
-  root: string,
+  authority: FilesystemAuthority,
   path: string,
   artifact: CandidateArtifact,
   label: string,
 ): Promise<CandidateFileDigest> {
-  const actual = await requireCandidateFile(root, path, label);
+  const actual = await requireCandidateFile(authority, path, label);
   const metadata = await stat(actual).catch(() => undefined);
   if (!metadata?.isFile()) {
     throw new Error(`${label} must be a regular file.`);
@@ -459,24 +454,12 @@ function digestFile(path: string): Promise<CandidateFileDigest> {
   });
 }
 
-async function requireCandidateFile(root: string, path: string, label: string): Promise<string> {
-  if (!isDescendantOrSelf(root, path)) {
-    throw new Error(`${label} escaped the runtime candidate root.`);
-  }
-  const metadata = await lstat(path).catch(() => undefined);
-  if (!metadata?.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`${label} must be a regular file.`);
-  }
-  const actual = await realpath(path).catch(() => {
-    throw new Error(`${label} could not be resolved.`);
-  });
-  if (
-    !isDescendantOrSelf(root, actual) ||
-    actual.toLowerCase() !== path.toLowerCase()
-  ) {
-    throw new Error(`${label} must not resolve through a link.`);
-  }
-  return actual;
+async function requireCandidateFile(
+  authority: FilesystemAuthority,
+  path: string,
+  label: string,
+): Promise<string> {
+  return authority.resolveFile(path, label);
 }
 
 function parseCandidateArtifacts(value: unknown): CandidateArtifact[] {
@@ -651,11 +634,4 @@ function sha256Bytes(value: Buffer): string {
 function isSafeRelativePath(value: string): boolean {
   return CANDIDATE_ARTIFACT_PATH_PATTERN.test(value)
     && !value.split('/').some((segment) => segment === '.' || segment === '..');
-}
-
-function isDescendantOrSelf(root: string, candidate: string): boolean {
-  const normalizedRoot = resolve(root);
-  const normalizedCandidate = resolve(candidate);
-  const child = relative(normalizedRoot, normalizedCandidate);
-  return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !/^[A-Za-z]:/u.test(child));
 }

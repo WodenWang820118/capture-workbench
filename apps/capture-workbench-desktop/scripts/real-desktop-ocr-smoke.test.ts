@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -373,6 +373,64 @@ test('local package identity uses the actual installed runtime when source-stage
   assert.equal(identity.candidateId, candidate.candidateId);
   assert.equal(identity.runtimeVersion, '0.4.2');
   assert.equal(identity.contractSetSha256.length, 64);
+});
+
+test('local package identity accepts an installed candidate under an ancestor junction alias', async () => {
+  const physicalRoot = await mkdtemp(join(tmpdir(), 'capture-local-identity-ancestor-physical-'));
+  const aliasRoot = join(
+    tmpdir(),
+    `capture-local-identity-ancestor-alias-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  try {
+    await symlink(physicalRoot, aliasRoot, 'junction');
+    assert.notEqual(await realpath(aliasRoot), aliasRoot);
+    const root = join(aliasRoot, 'run');
+    const candidateRoot = join(root, 'candidate');
+    const installRoot = join(root, 'install');
+    await mkdir(join(installRoot, 'binaries'), { recursive: true });
+    await mkdir(join(installRoot, 'resources'), { recursive: true });
+    const runtimeBytes = Buffer.from('ancestor-runtime');
+    const candidate = await writeRuntimeCandidate(candidateRoot, runtimeBytes);
+    await writeFile(
+      join(installRoot, 'binaries', 'capture-runtime-x86_64-pc-windows-msvc.exe'),
+      runtimeBytes,
+    );
+    await writeFile(
+      join(installRoot, 'resources', 'capture-runtime-manifest.json'),
+      JSON.stringify({
+        apiVersion: '2.0',
+        arch: 'x86_64',
+        bytes: runtimeBytes.length,
+        captureDocumentSchemaVersion: '2',
+        fileName: 'capture-runtime-x86_64-pc-windows-msvc.exe',
+        manifestVersion: '1',
+        platform: 'windows',
+        runtimeVersion: '0.4.2',
+        schemaFileName: 'capture-document-v2.schema.json',
+        schemaSha256: sha256('{"schemaVersion":"2"}\n'),
+        sha256: sha256(runtimeBytes),
+      }) + '\n',
+    );
+    const installedExecutable = join(installRoot, 'capture-workbench-desktop.exe');
+    await writeFile(installedExecutable, 'desktop');
+
+    const identity = await resolveLocalInstalledRuntimeIdentity({
+      installedExecutablePath: installedExecutable,
+      candidateRoot,
+      candidateId: candidate.candidateId,
+      installerProvenance: {
+        buildFlavor: 'acceptance',
+        stagedRuntimeSha256: candidate.runtimeSha256,
+        runtimeManifestSha256: candidate.runtimeManifestSha256,
+      },
+    });
+
+    assert.equal(identity.runtimeSha256, candidate.runtimeSha256);
+    assert.equal(identity.candidateId, candidate.candidateId);
+  } finally {
+    await rm(aliasRoot, { force: true });
+    await rm(physicalRoot, { recursive: true, force: true });
+  }
 });
 
 test('local package identity accepts installed manifest serialization differences', async () => {

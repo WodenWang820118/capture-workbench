@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
 import net from 'node:net';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
@@ -63,6 +63,10 @@ import {
   verifyLocalCandidateModel,
   type LocalCandidateModelIdentity,
 } from './local-candidate-model.ts';
+import {
+  openFilesystemAuthority,
+  type FilesystemAuthority,
+} from './filesystem-authority.ts';
 
 const workspaceRoot = resolve(appRoot, '..', '..');
 const outputDirectory = join(workspaceRoot, 'tmp', 'capture-workbench-desktop', 'real-desktop-ocr-smoke');
@@ -516,14 +520,18 @@ export async function resolveDesktopRuntimePreflight(
 export async function resolveLocalInstalledRuntimeIdentity(
   options: LocalInstalledRuntimeIdentityOptions,
 ): Promise<LocalInstalledRuntimeIdentity> {
-  const candidateRoot = await requireInstalledRegularDirectory(options.candidateRoot, 'runtime candidate root');
+  const candidateAuthority = await openFilesystemAuthority(
+    options.candidateRoot,
+    undefined,
+    'runtime candidate root',
+  );
   if (!/^[a-f0-9]{64}$/u.test(options.candidateId)) {
     throw new Error('Local package runtime candidate ID is invalid.');
   }
   if (options.sourceStagedRuntimeSha256 !== undefined && !/^[a-f0-9]{64}$/u.test(options.sourceStagedRuntimeSha256)) {
     throw new Error('Source-staged runtime SHA-256 is invalid.');
   }
-  const candidateManifestPath = await requireCandidateFile(candidateRoot, 'candidate-manifest.json', 'Runtime candidate manifest');
+  const candidateManifestPath = await requireCandidateFile(candidateAuthority, 'candidate-manifest.json', 'Runtime candidate manifest');
   const candidateManifestBytes = await readFile(candidateManifestPath);
   const candidateManifest = parseJsonRecord(candidateManifestBytes, 'Runtime candidate manifest');
   if (candidateManifest.candidateKind !== 'runtime' || candidateManifest.candidateId !== options.candidateId) {
@@ -538,15 +546,15 @@ export async function resolveLocalInstalledRuntimeIdentity(
     throw new Error('Runtime candidate version is not 0.4.2.');
   }
   const candidateContractSetSha256 = requireDigest(candidateManifest.contractSetSha256, 'runtime candidate contract set');
-  const candidateContractBytes = await readFile(await requireCandidateFile(candidateRoot, 'contracts/contract-set.json', 'Runtime candidate contract set'));
+  const candidateContractBytes = await readFile(await requireCandidateFile(candidateAuthority, 'contracts/contract-set.json', 'Runtime candidate contract set'));
   if (sha256Bytes(candidateContractBytes) !== candidateContractSetSha256) {
     throw new Error('Runtime candidate contract-set bytes are not allowed by the candidate.');
   }
-  if ((await readFile(await requireCandidateFile(candidateRoot, 'contracts/contract-set.sha256', 'Runtime candidate contract-set digest file'), 'utf8')).trim() !== candidateContractSetSha256) {
+  if ((await readFile(await requireCandidateFile(candidateAuthority, 'contracts/contract-set.sha256', 'Runtime candidate contract-set digest file'), 'utf8')).trim() !== candidateContractSetSha256) {
     throw new Error('Runtime candidate contract-set digest file is not self-consistent.');
   }
 
-  const candidateRuntimeManifestPath = await requireCandidateFile(candidateRoot, 'runtime/capture-runtime-manifest.json', 'Candidate runtime manifest');
+  const candidateRuntimeManifestPath = await requireCandidateFile(candidateAuthority, 'runtime/capture-runtime-manifest.json', 'Candidate runtime manifest');
   const candidateRuntimeManifestBytes = await readFile(candidateRuntimeManifestPath);
   const candidateRuntimeManifestSha256 = sha256Bytes(candidateRuntimeManifestBytes);
   const candidateRuntimeManifest = parseJsonRecord(candidateRuntimeManifestBytes, 'Candidate runtime manifest');
@@ -559,7 +567,7 @@ export async function resolveLocalInstalledRuntimeIdentity(
     throw new Error('Candidate runtime manifest version or byte count is invalid.');
   }
   const candidateRuntimeArtifact = findCandidateRuntimeArtifact(candidateManifest.artifacts, candidateRuntimeManifest.fileName);
-  const candidateRuntimeArtifactPath = await requireCandidateFile(candidateRoot, candidateRuntimeArtifact.path, 'Runtime candidate executable');
+  const candidateRuntimeArtifactPath = await requireCandidateFile(candidateAuthority, candidateRuntimeArtifact.path, 'Runtime candidate executable');
   const candidateRuntimeArtifactBytes = await readFile(candidateRuntimeArtifactPath);
   if (
     candidateRuntimeArtifact.bytes !== candidateRuntimeArtifactBytes.length ||
@@ -579,7 +587,7 @@ export async function resolveLocalInstalledRuntimeIdentity(
   ) {
     throw new Error('Runtime candidate manifest artifact is not self-consistent.');
   }
-  const candidateSchemaPath = await requireCandidateFile(candidateRoot, 'runtime/capture-document-v2.schema.json', 'Runtime candidate schema');
+  const candidateSchemaPath = await requireCandidateFile(candidateAuthority, 'runtime/capture-document-v2.schema.json', 'Runtime candidate schema');
   const candidateSchemaBytes = await readFile(candidateSchemaPath);
   if (candidateRuntimeManifest.schemaSha256 !== sha256Bytes(candidateSchemaBytes)) {
     throw new Error('Runtime candidate schema identity is not self-consistent.');
@@ -665,39 +673,26 @@ async function readLocalInstalledRuntimeProvenance(): Promise<LocalInstalledRunt
   };
 }
 
-async function requireInstalledRegularDirectory(path: string, label: string): Promise<string> {
-  const input = resolve(path);
-  const inputMetadata = await lstat(input);
-  if (inputMetadata.isSymbolicLink()) {
-    throw new Error(`${label} must be a regular directory.`);
-  }
-  const resolved = await realpath(input);
-  const metadata = await lstat(resolved);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error(`${label} must be a regular directory.`);
-  }
-  return resolved;
-}
-
 async function requireInstalledRegularFile(path: string, label: string): Promise<string> {
   const resolved = resolve(path);
-  const metadata = await lstat(resolved);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`${label} must be a regular file.`);
-  }
-  const actual = await realpath(resolved);
-  if (actual.toLowerCase() !== resolved.toLowerCase()) {
-    throw new Error(`${label} must not resolve through a link.`);
-  }
-  return actual;
+  const parentAuthority = await openFilesystemAuthority(
+    dirname(resolved),
+    undefined,
+    label,
+  );
+  return parentAuthority.resolveFile(resolved, label);
 }
 
-async function requireCandidateFile(root: string, relativePath: string, label: string): Promise<string> {
-  const candidatePath = resolve(root, relativePath);
-  if (!isDescendantOrSelf(root, candidatePath)) {
-    throw new Error(`${label} escaped the runtime candidate root.`);
-  }
-  return requireInstalledRegularFile(candidatePath, label);
+async function requireCandidateFile(
+  authority: FilesystemAuthority,
+  relativePath: string,
+  label: string,
+): Promise<string> {
+  const candidatePath = authority.child(
+    join(authority.canonicalRoot, ...relativePath.split('/')),
+    label,
+  );
+  return authority.resolveFile(candidatePath, label);
 }
 
 type InstalledResourceKind = 'manifest' | 'runtime';

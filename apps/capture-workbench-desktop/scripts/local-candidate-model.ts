@@ -1,16 +1,15 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
-  lstat,
   readdir,
-  realpath,
 } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 
 import {
   readVerifiedLocalCandidateCatalog,
   type StartLocalCandidateWorkerMirrorOptions,
 } from './local-candidate-worker-mirror.ts';
+import { openFilesystemAuthority, type FilesystemAuthority } from './filesystem-authority.ts';
 
 const LOCAL_MODEL_RUNTIME_VERSION = '0.4.2';
 const LOCAL_MODEL_ENTRY_POINT = 'model';
@@ -85,8 +84,12 @@ export async function verifyLocalCandidateModel(
   const descriptor = parseLocalCandidateModelDescriptor(
     verifiedCatalog.requirement.modelFiles,
   );
-  const root = await requireRegularRoot(options.modelRoot);
-  const entries = await collectRootEntries(root);
+  const modelAuthority = await openFilesystemAuthority(
+    options.modelRoot,
+    undefined,
+    'Local candidate model root',
+  );
+  const entries = await collectRootEntries(modelAuthority);
   const files = entries.filter((entry) => !entry.isDirectory);
   const directories = entries.filter((entry) => entry.isDirectory);
   const expectedPaths = new Set(descriptor.files.map((file) => file.path));
@@ -254,23 +257,9 @@ function isSafeRelativePath(value: string): boolean {
   return parts.every((part) => part.length > 0 && part !== '.' && part !== '..');
 }
 
-async function requireRegularRoot(inputPath: string): Promise<string> {
-  const input = resolve(inputPath);
-  const metadata = await lstat(input).catch(() => undefined);
-  if (!metadata?.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error('Local candidate model root must be a regular directory.');
-  }
-  const canonical = await realpath(input).catch(() => undefined);
-  if (
-    canonical === undefined ||
-    canonical.toLowerCase() !== input.toLowerCase()
-  ) {
-    throw new Error('Local candidate model root must not resolve through a link.');
-  }
-  return canonical;
-}
-
-async function collectRootEntries(root: string): Promise<readonly RootEntry[]> {
+async function collectRootEntries(
+  authority: FilesystemAuthority,
+): Promise<readonly RootEntry[]> {
   const result: RootEntry[] = [];
   async function visit(directory: string, relativeDirectory: string): Promise<void> {
     let children;
@@ -280,33 +269,35 @@ async function collectRootEntries(root: string): Promise<readonly RootEntry[]> {
       throw new Error('Local candidate model root could not be enumerated.');
     }
     for (const child of children) {
-      const path = join(directory, child.name);
+      const path = authority.child(
+        join(directory, child.name),
+        'Local candidate model entry',
+      );
       const relativePath = relativeDirectory
         ? `${relativeDirectory}/${child.name}`
         : child.name;
-      const metadata = await lstat(path).catch(() => undefined);
-      if (!metadata || metadata.isSymbolicLink()) {
+      if (child.isSymbolicLink()) {
         throw new Error('Local candidate model root contains a link.');
       }
-      const canonical = await realpath(path).catch(() => undefined);
-      if (
-        canonical === undefined ||
-        !isDescendant(root, canonical) ||
-        canonical.toLowerCase() !== path.toLowerCase()
-      ) {
-        throw new Error('Local candidate model root contains an escaping entry.');
-      }
-      if (metadata.isDirectory()) {
-        result.push({ path, relativePath, isDirectory: true });
+      if (child.isDirectory()) {
+        const canonical = await authority.resolveDirectory(
+          path,
+          'Local candidate model directory',
+        );
+        result.push({ path: canonical, relativePath, isDirectory: true });
         await visit(path, relativePath);
-      } else if (metadata.isFile()) {
-        result.push({ path, relativePath, isDirectory: false });
+      } else if (child.isFile()) {
+        const canonical = await authority.resolveFile(
+          path,
+          'Local candidate model file',
+        );
+        result.push({ path: canonical, relativePath, isDirectory: false });
       } else {
-        throw new Error('Local candidate model root contains a non-regular entry.');
+        throw new Error('Local candidate model root contains a link or non-regular entry.');
       }
     }
   }
-  await visit(root, '');
+  await visit(authority.canonicalRoot, '');
   return result;
 }
 
@@ -321,15 +312,6 @@ function expectedParentDirectories(
     }
   }
   return result;
-}
-
-function isDescendant(root: string, candidate: string): boolean {
-  const rootPath = root.endsWith(sep) ? root : `${root}${sep}`;
-  const candidatePath = resolve(candidate);
-  return (
-    candidatePath.toLowerCase() === root.toLowerCase() ||
-    candidatePath.toLowerCase().startsWith(rootPath.toLowerCase())
-  );
 }
 
 function digestFile(path: string): Promise<FileDigest> {
