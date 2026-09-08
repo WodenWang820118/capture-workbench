@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 LOCK_VERSION = "2"
 RELEASE_VERSION = "0.4.2"
-COMMIT_A_SHA = "ca18dd9c235d1639c465b95c5d36830031a7885a"
+COMMIT_A_SHA = "c219cf9d887056b782c2a9f1d3a9d1b79467f0e7"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 FIRST_PARTY_REPOSITORY_ROOT = "packages/capture-runtime/model-sources/commit-a"
 FIRST_PARTY_ROOT = (
